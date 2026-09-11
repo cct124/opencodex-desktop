@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 /** Reuse this desktop session on restart while retaining its preview-only boundaries. */
-export function preparePreviewConfig(path: string, resumeCodex = false): { shutdownTimeoutMs: number } {
+export function preparePreviewConfig(path: string, resumeCodex = false, persistent = false): { shutdownTimeoutMs: number } {
   const previous = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { providers: {}, defaultProvider: "openai" };
   if (!previous || typeof previous !== "object" || Array.isArray(previous)) {
     throw new Error("Invalid desktop session configuration; inspect the file before retrying.");
@@ -16,8 +16,9 @@ export function preparePreviewConfig(path: string, resumeCodex = false): { shutd
     shutdownTimeoutMs,
     codexAutoStart: false,
     codexShimAutoRestore: false,
-    clientIntegrations: { ...previous.clientIntegrations, codex: resumeCodex || previous.clientIntegrations?.codex === true, grok: false, "claude-desktop": false },
+    clientIntegrations: { ...previous.clientIntegrations, codex: persistent ? resumeCodex : resumeCodex || previous.clientIntegrations?.codex === true, grok: false, "claude-desktop": false },
     claudeCode: { ...previous.claudeCode, enabled: false, systemEnv: false },
+    ...(persistent ? { syncResumeHistory: false } : {}),
   };
   writeFileSync(path, JSON.stringify(next, null, 2));
   return { shutdownTimeoutMs };

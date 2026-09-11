@@ -124,6 +124,20 @@ describe("shouldUseCodexWsUpstream", () => {
     expect(shouldUseCodexWsUpstream(CODEX_URL, { method: "POST", body: new Blob(["x"]) as unknown as string })).toBe(false);
   });
 
+  test("managed desktop selects native HTTPS before dispatch while preserving provider WS opt-in", () => {
+    const previous = process.env.OPENCODEX_DESKTOP_MANAGED;
+    try {
+      process.env.OPENCODEX_DESKTOP_MANAGED = "1";
+      expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(false);
+      expect(shouldUseCodexWsUpstream("https://gateway.example.com/v1/responses", streamingInit(), true)).toBe(true);
+      delete process.env.OPENCODEX_DESKTOP_MANAGED;
+      expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODEX_DESKTOP_MANAGED;
+      else process.env.OPENCODEX_DESKTOP_MANAGED = previous;
+    }
+  });
+
   test("requires a ROOT-level stream flag, not a serialized substring", () => {
     // Nested stream:true must not flip the transport.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {

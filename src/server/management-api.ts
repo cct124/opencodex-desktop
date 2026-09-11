@@ -156,7 +156,7 @@ export async function handleManagementAPI(
     return jsonResponse({ error: "cross-origin request blocked" }, 403, req, config);
   }
   if (desktopPreviewBlocksHostAction(req.method, url.pathname)) {
-    return jsonResponse({ error: "Desktop development preview uses isolated configuration. System installation, updates, integration switching and process restart are not available in this preview." }, 409, req, config);
+    return jsonResponse({ error: "This backend is managed by OpenCodex Desktop. Use its tray or desktop controls for client connection and process lifecycle. System installation and standalone updates are not available here." }, 409, req, config);
   }
   // Management bodies are small JSON (provider names, key ids, settings). Reject oversized
   // payloads before any handler buffers them — the data plane has its own decompression cap.

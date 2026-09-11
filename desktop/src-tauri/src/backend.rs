@@ -10,9 +10,13 @@ use std::{
 };
 
 pub enum Control {
-    Stop,
+    Stop {
+        disconnect: bool,
+    },
     Restore,
     RestoreBack,
+    Import(String),
+    ImportExisting,
     #[cfg(debug_assertions)]
     CrashForSmoke,
 }
@@ -20,6 +24,8 @@ pub enum Control {
 pub enum Event {
     Started(u32),
     Ready(String),
+    Profile(bool),
+    Reconfigure(String),
     Routing {
         routing: String,
         success: Option<bool>,
@@ -41,15 +47,20 @@ struct WireEvent {
     message: Option<String>,
     routing: Option<String>,
     success: Option<bool>,
+    attached: Option<bool>,
 }
 
-fn shutdown(input: &mut Option<ChildStdin>, requested: &mut Option<Instant>) {
+fn shutdown(input: &mut Option<ChildStdin>, requested: &mut Option<Instant>, disconnect: bool) {
     if requested.is_some() {
         return;
     }
     *requested = Some(Instant::now());
     if let Some(mut pipe) = input.take() {
-        let _ = pipe.write_all(b"shutdown\n");
+        let _ = pipe.write_all(if disconnect {
+            b"shutdown-disconnect\n"
+        } else {
+            b"shutdown\n"
+        });
         let _ = pipe.flush();
         // Closing this pipe also triggers cleanup if the desktop process disappears.
     }
@@ -59,7 +70,7 @@ fn shutdown(input: &mut Option<ChildStdin>, requested: &mut Option<Instant>) {
 /// under an old monitor, and all events carry a generation at the UI boundary.
 pub fn spawn(
     repo: PathBuf,
-    session: PathBuf,
+    profile: crate::profile::Profile,
     log_path: PathBuf,
     resume_codex: bool,
     emit: impl Fn(Event) + Send + 'static,
@@ -81,13 +92,23 @@ pub fn spawn(
             let mut command = Command::new(bun);
             command
                 .arg(repo.join("desktop/runtime/entry.ts"))
-                .arg(session)
+                .arg(&profile.session)
                 .current_dir(repo)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::from(log.try_clone()?));
             if resume_codex {
                 command.arg("--resume-codex");
+            }
+            if profile.persistent {
+                command
+                    .arg("--persistent")
+                    .arg("--data-root")
+                    .arg(&profile.root)
+                    .arg("--codex-home")
+                    .arg(&profile.codex_home)
+                    .arg("--source-config")
+                    .arg(&profile.source_config);
             }
             #[cfg(windows)]
             {
@@ -120,9 +141,10 @@ pub fn spawn(
             let mut forced = false;
             loop {
                 match rx.try_recv() {
-                    Ok(Control::Stop) | Err(TryRecvError::Disconnected) => {
-                        shutdown(&mut input, &mut requested)
+                    Ok(Control::Stop { disconnect }) => {
+                        shutdown(&mut input, &mut requested, disconnect)
                     }
+                    Err(TryRecvError::Disconnected) => shutdown(&mut input, &mut requested, false),
                     Ok(control @ (Control::Restore | Control::RestoreBack)) => {
                         if ready && requested.is_none() {
                             let command: &[u8] = if matches!(control, Control::Restore) {
@@ -138,6 +160,28 @@ pub fn spawn(
                                     routing: "unknown".into(),
                                     success: Some(false),
                                     message: Some("无法向当前后端发送 Codex 切换请求。".into()),
+                                });
+                            }
+                        }
+                    }
+                    Ok(control @ (Control::Import(_) | Control::ImportExisting)) => {
+                        if ready && requested.is_none() {
+                            let command = match control {
+                                Control::Import(config) => format!(
+                                    "{}\n",
+                                    serde_json::json!({ "type": "import-config", "config": config })
+                                ),
+                                _ => "import-existing\n".into(),
+                            };
+                            if !input.as_mut().is_some_and(|pipe| {
+                                pipe.write_all(command.as_bytes())
+                                    .and_then(|_| pipe.flush())
+                                    .is_ok()
+                            }) {
+                                emit(Event::Routing {
+                                    routing: "unknown".into(),
+                                    success: Some(false),
+                                    message: Some("无法发送配置导入请求。".into()),
                                 });
                             }
                         }
@@ -163,8 +207,14 @@ pub fn spawn(
                             emit(Event::Error(
                                 event.message.unwrap_or_else(|| "后端启动失败。".into()),
                             ));
-                            shutdown(&mut input, &mut requested);
+                            shutdown(&mut input, &mut requested, false);
                         }
+                        "profile" => emit(Event::Profile(event.attached.unwrap_or(false))),
+                        "reconfigure" => emit(Event::Reconfigure(
+                            event
+                                .message
+                                .unwrap_or_else(|| "设置已保存，正在重启代理…".into()),
+                        )),
                         "routing" => emit(Event::Routing {
                             routing: event.routing.unwrap_or_else(|| "unknown".into()),
                             success: event.success,
@@ -175,7 +225,7 @@ pub fn spawn(
                 }
                 if !ready && requested.is_none() && started.elapsed() > Duration::from_secs(75) {
                     emit(Event::Error("后端启动超时，可查看日志后重试。".into()));
-                    shutdown(&mut input, &mut requested);
+                    shutdown(&mut input, &mut requested, false);
                 }
                 // Allow an admitted routing command (45 s), drain (60 s), then cleanup.
                 if requested.is_some_and(|at| at.elapsed() > Duration::from_secs(130)) {

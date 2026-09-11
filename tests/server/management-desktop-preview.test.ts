@@ -1,9 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import { desktopPreviewBlocksHostAction } from "../../src/server/desktop-preview";
+import { desktopPreviewBlocksHostAction, desktopRestoresCodexOnShutdown } from "../../src/server/desktop-preview";
 import { getDefaultConfig } from "../../src/config";
 import { handleManagementAPI } from "../../src/server/management-api";
 
 describe("desktop preview host actions", () => {
+  test("persistent desktop also owns host actions and only cleans up its admitted route", () => {
+    const managed = process.env.OPENCODEX_DESKTOP_MANAGED;
+    const skip = process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE;
+    try {
+      process.env.OPENCODEX_DESKTOP_MANAGED = "1";
+      process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE = "1";
+      expect(desktopPreviewBlocksHostAction("POST", "/api/system/restart")).toBe(true);
+      expect(desktopRestoresCodexOnShutdown()).toBe(false);
+      process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE = "0";
+      expect(desktopRestoresCodexOnShutdown()).toBe(true);
+      delete process.env.OPENCODEX_DESKTOP_MANAGED;
+      process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE = "1";
+      expect(desktopRestoresCodexOnShutdown()).toBe(true);
+    } finally {
+      if (managed === undefined) delete process.env.OPENCODEX_DESKTOP_MANAGED; else process.env.OPENCODEX_DESKTOP_MANAGED = managed;
+      if (skip === undefined) delete process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE; else process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE = skip;
+    }
+  });
   test("management API refuses a host action before calling its implementation", async () => {
     const previous = process.env.OPENCODEX_DESKTOP_PREVIEW;
     process.env.OPENCODEX_DESKTOP_PREVIEW = "1";

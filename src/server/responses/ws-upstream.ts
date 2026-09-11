@@ -103,6 +103,9 @@ export function shouldUseCodexWsUpstream(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   upstreamWebsocketConfigured = false,
 ): boolean {
+  // Desktop's bundled runtime uses the verified HTTPS/SSE path for native Codex.
+  // Select before dispatch: replaying a failed WS stream could generate twice.
+  if (url === CODEX_RESPONSES_HTTP_URL && process.env.OPENCODEX_DESKTOP_MANAGED === "1") return false;
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
   if (url !== CODEX_RESPONSES_HTTP_URL && !upstreamWebsocketConfigured) return false;
   if (upstreamWebsocketConfigured && !isResponsesWebsocketEligibleUrl(url)) return false;

@@ -2,6 +2,7 @@
 
 mod backend;
 mod lifecycle;
+mod profile;
 #[cfg(debug_assertions)]
 mod smoke;
 
@@ -12,7 +13,7 @@ use std::{
     path::PathBuf,
     sync::{mpsc::Sender, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -37,6 +38,11 @@ struct Status {
     codex_routing: String,
     routing_busy: bool,
     can_route: bool,
+    persistent: bool,
+    data_dir: String,
+    codex_home: String,
+    source_config: String,
+    codex_attached: bool,
 }
 
 #[derive(Default)]
@@ -56,11 +62,13 @@ struct Model {
     routing_busy: bool,
     // Only an explicit restart carries the previous route across native cleanup.
     restart_resume_codex: bool,
+    codex_attached: bool,
 }
 
 struct DesktopState {
     repo: PathBuf,
     session: PathBuf,
+    profile: profile::Profile,
     model: Mutex<Model>,
 }
 struct TrayItems {
@@ -91,6 +99,11 @@ fn status(app: &tauri::AppHandle) -> Status {
         codex_routing: model.codex_routing.clone(),
         routing_busy: model.routing_busy,
         can_route: model.lifecycle.can_restart() && !model.routing_busy,
+        persistent: state.profile.persistent,
+        data_dir: state.profile.root.display().to_string(),
+        codex_home: state.profile.codex_home.display().to_string(),
+        source_config: state.profile.source_config.display().to_string(),
+        codex_attached: model.codex_attached,
     }
 }
 
@@ -116,7 +129,9 @@ fn refresh(app: &tauri::AppHandle) {
         let _ = items.start.set_enabled(snapshot.can_start);
         let _ = items.stop.set_enabled(snapshot.can_stop);
         let _ = items.restart.set_enabled(snapshot.can_restart);
-        let routing = if snapshot.routing_busy {
+        let routing = if snapshot.persistent && !snapshot.codex_attached {
+            "Codex：尚未接入桌面代理"
+        } else if snapshot.routing_busy {
             "Codex：正在切换…"
         } else {
             match snapshot.codex_routing.as_str() {
@@ -182,7 +197,7 @@ fn request_stop(app: &tauri::AppHandle, intent: Intent) {
         model.lifecycle.stop(intent);
         let message = match intent {
             Intent::Restart => Some("正在排空请求，旧后端退出后将重新启动…"),
-            Intent::Exit => Some("正在停止代理并清理开发配置，完成后退出应用…"),
+            Intent::Exit => Some("正在停止代理并恢复配置，完成后退出应用…"),
             Intent::Stop => Some("正在排空请求并停止代理，桌面应用将继续驻留…"),
             Intent::Failure => None,
         };
@@ -190,7 +205,9 @@ fn request_stop(app: &tauri::AppHandle, intent: Intent) {
             model.message = message.into();
         }
         if let Some(control) = &model.control {
-            let _ = control.send(backend::Control::Stop);
+            let _ = control.send(backend::Control::Stop {
+                disconnect: intent == Intent::Stop,
+            });
         }
         model.lifecycle.active
     };
@@ -238,7 +255,7 @@ fn start_backend(app: &tauri::AppHandle) {
     let event_app = app.clone();
     let control = backend::spawn(
         state.repo.clone(),
-        state.session.clone(),
+        state.profile.clone(),
         log_path,
         resume_codex,
         move |event| {
@@ -260,6 +277,14 @@ fn backend_event(app: &tauri::AppHandle, generation: u64, event: backend::Event)
     match event {
         backend::Event::Started(pid) => {
             state.model.lock().unwrap().backend_pid = Some(pid);
+        }
+        backend::Event::Profile(attached) => {
+            state.model.lock().unwrap().codex_attached = attached;
+        }
+        backend::Event::Reconfigure(message) => {
+            state.model.lock().unwrap().routing_busy = false;
+            request_stop(app, Intent::Restart);
+            state.model.lock().unwrap().message = message;
         }
         backend::Event::Ready(raw) => {
             let Some(url) = backend_url(&raw) else {
@@ -373,7 +398,7 @@ fn open_dashboard(app: &tauri::AppHandle, url: tauri::Url, generation: u64) -> t
         .inner_size(1320.0, 860.0)
         .min_inner_size(960.0, 640.0)
         .visible(false)
-        .data_directory(state.session.join("webview"))
+        .data_directory(state.profile.root.join("webview"))
         .on_navigation(move |target| {
             if target.origin() == origin {
                 return true;
@@ -440,7 +465,13 @@ fn action(app: &tauri::AppHandle, name: &str) {
             request_stop(app, Intent::Stop)
         }
         "restart" if snapshot.can_restart => request_stop(app, Intent::Restart),
-        "restore" | "restore-back" if snapshot.can_route => {
+        "restore-back" if snapshot.persistent && !snapshot.codex_attached => {
+            app.state::<DesktopState>().model.lock().unwrap().message =
+                "请在桌面控制页确认 Codex 目录并启用连接。".into();
+            show_window(app, true);
+            refresh(app);
+        }
+        "restore" | "restore-back" | "connect-codex" if snapshot.can_route => {
             let state = app.state::<DesktopState>();
             {
                 let mut model = state.model.lock().unwrap();
@@ -467,6 +498,18 @@ fn action(app: &tauri::AppHandle, name: &str) {
             }
             refresh(app);
         }
+        "import-existing" if snapshot.can_route => {
+            send_import(app, None);
+        }
+        "data" => {
+            let path = app
+                .state::<DesktopState>()
+                .profile
+                .root
+                .display()
+                .to_string();
+            let _ = app.opener().open_path(path, None::<&str>);
+        }
         "quit" => request_stop(app, Intent::Exit),
         "logs" => {
             let path = app.state::<DesktopState>().session.display().to_string();
@@ -479,6 +522,45 @@ fn action(app: &tauri::AppHandle, name: &str) {
         }
         _ => {}
     }
+}
+
+fn send_import(app: &tauri::AppHandle, config: Option<String>) {
+    let state = app.state::<DesktopState>();
+    if !status(app).can_route {
+        return;
+    }
+    {
+        let mut model = state.model.lock().unwrap();
+        let command = config
+            .map(backend::Control::Import)
+            .unwrap_or(backend::Control::ImportExisting);
+        if model
+            .control
+            .as_ref()
+            .is_some_and(|control| control.send(command).is_ok())
+        {
+            model.routing_busy = true;
+            model.message = "正在校验并导入配置…".into();
+        }
+    }
+    refresh(app);
+}
+
+#[tauri::command]
+fn desktop_import_config(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    config: String,
+) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("Only the local launcher may import configuration".into());
+    }
+    if config.len() > 1024 * 1024 {
+        return Err("配置文件不能超过 1 MB".into());
+    }
+    let target = app.clone();
+    app.run_on_main_thread(move || send_import(&target, Some(config)))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -506,6 +588,9 @@ fn desktop_action(
         "restart",
         "restore",
         "restore-back",
+        "connect-codex",
+        "import-existing",
+        "data",
         "logs",
         "quit",
     ]
@@ -598,20 +683,21 @@ fn main() {
             });
         }))
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![desktop_status, desktop_action])
+        .invoke_handler(tauri::generate_handler![
+            desktop_status,
+            desktop_action,
+            desktop_import_config
+        ])
         .setup(|app| {
             let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
                 .canonicalize()?;
-            let session = repo.join(".tmp/desktop").join(format!(
-                "session-{}-{}",
-                std::process::id(),
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-            ));
-            fs::create_dir_all(&session)?;
+            let profile = profile::Profile::create(app.handle(), &repo)?;
+            let session = profile.session.clone();
             app.manage(DesktopState {
                 repo,
                 session,
+                profile,
                 model: Mutex::new(Model {
                     wants_window: true,
                     ..Model::default()

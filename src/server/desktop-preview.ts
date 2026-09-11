@@ -10,9 +10,14 @@ const HOST_ACTIONS = new Set([
   "/api/claude-desktop/apply",
 ]);
 
-export function desktopPreviewBlocksHostAction(method: string, pathname: string, preview = process.env.OPENCODEX_DESKTOP_PREVIEW === "1"): boolean {
+export function desktopPreviewBlocksHostAction(method: string, pathname: string, preview = process.env.OPENCODEX_DESKTOP_PREVIEW === "1" || process.env.OPENCODEX_DESKTOP_MANAGED === "1"): boolean {
   if (!preview || method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   return HOST_ACTIONS.has(pathname)
     || pathname === "/api/client-integrations"
     || pathname.startsWith("/api/client-integrations/");
+}
+
+/** The desktop owner only restores a route it has explicitly connected and still owns. */
+export function desktopRestoresCodexOnShutdown(): boolean {
+  return process.env.OPENCODEX_DESKTOP_MANAGED !== "1" || process.env.OPENCODEX_DESKTOP_SKIP_CODEX_RESTORE !== "1";
 }

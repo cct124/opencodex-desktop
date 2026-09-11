@@ -760,6 +760,11 @@ route WSS. Unsupported or malformed selected proxy values skip the WebSocket att
 existing SSE path immediately; they never fall through to a lower-priority proxy or direct WebSocket
 egress. HTTP/SSE fallback retains Bun fetch's own proxy rules, which do not consult ALL_PROXY.
 
+The Tauri fork's managed desktop backend (`OPENCODEX_DESKTOP_MANAGED=1`) selects HTTPS/SSE for
+the native Codex endpoint before dispatch. This is a desktop compatibility choice; ordinary CLI
+traffic and explicit third-party `upstreamWebsocket` opt-in keep the behavior above. It does not
+resend a request after a WebSocket stream has started.
+
 The endpoint handles `response.create`, ignores `response.processed`, supports warmup
 `generate: false`, and feeds the same request pipeline as HTTP/SSE.
 

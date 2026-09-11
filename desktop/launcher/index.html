@@ -5,14 +5,31 @@
   <main>
     <div class="badge">OPENCODEX · DESKTOP</div>
     <h1>正在启动</h1>
-    <p id="message" role="status">正在准备独立的开发实例…</p>
+    <p id="message" role="status">正在准备桌面后端…</p>
     <div class="progress" aria-hidden="true"></div>
-    <p class="hint">点击 X 关闭窗口后继续驻留系统托盘。停止代理会保留桌面应用；退出应用会同时停止代理。当前切换仅作用于独立开发会话中的 Codex 配置。</p>
+    <p class="hint" id="mode-hint">正在读取运行模式…</p>
     <div class="actions">
       <button data-action="open" id="open" hidden>打开主窗口</button>
       <button data-action="start" id="start" hidden>启动代理</button>
       <button data-action="restart" id="restart" disabled>重启代理</button>
     </div>
+    <section id="connection" hidden>
+      <h2>连接 Codex</h2>
+      <p class="hint">启用后，Codex 将使用桌面版代理。退出应用时恢复原生配置，下次打开应用会按此选择重新连接；选择“恢复原生”或“停止代理”会取消自动连接。</p>
+      <pre id="codex-home"></pre>
+      <button data-action="connect-codex" id="connect-codex" disabled>启用 Codex 代理并记住选择</button>
+    </section>
+    <details id="configuration">
+      <summary>配置与数据</summary>
+      <p>提供方、模型和设置保存在桌面版数据目录。可以从零配置，也可以导入已有的 OpenCodex 配置 JSON。</p>
+      <pre id="data-dir"></pre>
+      <div class="actions">
+        <button data-action="data">打开数据目录</button>
+        <button id="import-existing">导入原有 OpenCodex 配置…</button>
+        <label class="file-button">选择配置文件<input type="file" id="config-file" accept=".json,application/json"></label>
+      </div>
+      <p>导入会替换桌面版设置并自动备份旧配置。原安装不变；OAuth 登录、账户库、运行记录和系统服务不随配置文件导入。</p>
+    </details>
     <h2>停止与恢复</h2>
     <p id="routing-state" role="status">Codex：正在读取路由状态…</p>
     <div class="actions">
@@ -28,6 +45,12 @@
     </div>
     <p id="action-error" role="alert"></p>
   </main>
+  <dialog id="import-dialog">
+    <h2>导入配置</h2>
+    <p id="import-description"></p>
+    <p>配置中的提供方密钥也会复制到桌面版。导入完成后代理会重启。</p>
+    <div class="actions"><button id="confirm-import">导入并重启</button><button id="cancel-import">取消</button></div>
+  </dialog>
   <script src="app.js"></script>
 </body>
 </html>

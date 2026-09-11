@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenCodex Desktop Dev",
+  "productName": "OpenCodex Desktop",
   "version": "../../package.json",
-  "identifier": "me.opencodex.desktop.dev",
+  "identifier": "me.opencodex.desktop",
   "build": { "frontendDist": "../launcher" },
   "app": {
     "withGlobalTauri": true,

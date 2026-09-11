@@ -9,6 +9,8 @@ vision 和网络搜索 sidecar 也可以使用你的 ChatGPT 登录凭据。
 
 ## 前置条件
 
+实验性 Windows 桌面 fork 请参阅 [Windows 桌面 fork](/zh-cn/getting-started/desktop/)。以下步骤用于安装上游 CLI。
+
 | 要求 | 原因 |
 | --- | --- |
 | **[Node](https://nodejs.org) ≥ 18** | `ocx` 运行在 Bun 运行时上，但运行时会在 `npm install` 时自动打包，你**无需**自己安装 Bun。 |

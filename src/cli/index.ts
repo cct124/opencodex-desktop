@@ -15,6 +15,7 @@ try {
 }
 import { currentExternalCodexModelProvider, restoreNativeCodex, restoreNativeCodexAsync, shouldInjectApiAuthHeader } from "../codex/inject";
 import { stripGrokConfig } from "../grok/inject";
+import { desktopRestoresCodexOnShutdown } from "../server/desktop-preview";
 import { STOP_HISTORY_INCOMPLETE_EXIT_CODE } from "../update/stop-contract.mjs";
 import {
   describeHistoryJobFailure,
@@ -414,7 +415,7 @@ async function handleStart(options: { block?: boolean } = {}) {
     removePid(process.pid);
     removeRuntimePort(process.pid);
     const preserveRouting = process.env.OCX_SERVICE === "1";
-    if (!recycling && !preserveRouting && !currentExternalCodexModelProvider()) {
+    if (!recycling && !preserveRouting && desktopRestoresCodexOnShutdown() && !currentExternalCodexModelProvider()) {
       try {
         const restored = restoreNativeCodex();
         if (!restored.success) {

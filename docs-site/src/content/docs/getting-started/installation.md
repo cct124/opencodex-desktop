@@ -9,6 +9,9 @@ vision and web-search sidecars can also use your ChatGPT login when a routed mod
 
 ## Prerequisites
 
+For the experimental Windows desktop fork, see [Windows desktop fork](/getting-started/desktop/).
+The instructions below install the upstream CLI.
+
 | Requirement | Why |
 | --- | --- |
 | **[Node](https://nodejs.org) ≥ 18** | `ocx` runs on the Bun runtime, but the runtime is bundled automatically on `npm install` — you do **not** need to install Bun yourself. |

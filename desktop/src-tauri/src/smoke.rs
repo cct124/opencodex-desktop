@@ -279,16 +279,72 @@ fn lifecycle_check(app: &tauri::AppHandle, steps: &mut Vec<&str>) -> Result<(), 
     Ok(())
 }
 
+fn persistent_check(app: &tauri::AppHandle, steps: &mut Vec<&str>) -> Result<(), String> {
+    let first = wait_for(app, |s| s.phase == Phase::Loaded)?;
+    if !first.persistent {
+        return Err("persistent window started in preview mode".into());
+    }
+    if !std::env::args().any(|arg| arg == "--smoke-reopen") {
+        if first.codex_attached {
+            return Err("first launch connected without an explicit action".into());
+        }
+        on_ui(app, |a| action(a, "restore-back"))?;
+        if status(app).routing_busy {
+            return Err("tray action bypassed first-connection confirmation".into());
+        }
+        let visible = on_ui(app, |a| {
+            a.get_webview_window("launcher")
+                .unwrap()
+                .is_visible()
+                .unwrap_or(false)
+        })?;
+        if !visible {
+            return Err("tray action did not show connection controls".into());
+        }
+        on_ui(app, |a| action(a, "connect-codex"))?;
+        wait_for(app, |s| {
+            s.phase == Phase::Loaded && s.generation > first.generation && s.codex_attached
+        })?;
+        steps.push(
+            "first_connection_requires_local_controls_then_restarts_into_the_selected_client",
+        );
+    } else {
+        if !first.codex_attached {
+            return Err("reopen lost the saved connection choice".into());
+        }
+        steps.push("full_application_reopen_remembers_connection_and_storage");
+    }
+    let running = wait_for(app, |s| s.codex_routing == "opencodex-local")?;
+    gui_available(running.dashboard_url.as_ref().unwrap())?;
+    let state = app.state::<DesktopState>();
+    let config = fs::read_to_string(state.profile.codex_home.join("config.toml"))
+        .map_err(|e| e.to_string())?;
+    if !config.contains(
+        running
+            .dashboard_url
+            .as_ref()
+            .unwrap()
+            .trim_end_matches('/'),
+    ) {
+        return Err("client is not using this window's backend".into());
+    }
+    steps.push("persistent_window_loads_the_owned_backend_and_client_route");
+    Ok(())
+}
+
 pub fn install(app: &tauri::AppHandle) {
     let full = std::env::args().any(|arg| arg == "--smoke-lifecycle");
     let startup_stop = std::env::args().any(|arg| arg == "--smoke-startup-stop");
-    if !full && !startup_stop && !std::env::args().any(|arg| arg == "--smoke-test") {
+    let persistent = std::env::args().any(|arg| arg == "--smoke-persistent");
+    if !full && !startup_stop && !persistent && !std::env::args().any(|arg| arg == "--smoke-test") {
         return;
     }
     let app = app.clone();
     thread::spawn(move || {
         let mut steps = Vec::new();
-        let result = if full {
+        let result = if persistent {
+            persistent_check(&app, &mut steps)
+        } else if full {
             lifecycle_check(&app, &mut steps)
         } else if startup_stop {
             on_ui(&app, |a| action(a, "stop"))
