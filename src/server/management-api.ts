@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { desktopPreviewBlocksHostAction } from "./desktop-preview";
 import type { CatalogModel } from "../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeContextLimits, nativeModelRows, uniqueCatalogModelsForPublicList } from "../codex/catalog";
 import {
@@ -153,6 +154,9 @@ export async function handleManagementAPI(
 ): Promise<Response | null> {
   if (!isAllowedManagementOrigin(req, config)) {
     return jsonResponse({ error: "cross-origin request blocked" }, 403, req, config);
+  }
+  if (desktopPreviewBlocksHostAction(req.method, url.pathname)) {
+    return jsonResponse({ error: "Desktop development preview uses isolated configuration. System installation, updates, integration switching and process restart are not available in this preview." }, 409, req, config);
   }
   // Management bodies are small JSON (provider names, key ids, settings). Reject oversized
   // payloads before any handler buffers them — the data plane has its own decompression cap.
