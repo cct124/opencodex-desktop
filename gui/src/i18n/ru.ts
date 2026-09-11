@@ -4,6 +4,8 @@ import type { TKey } from "./en";
  * Russian i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ru: Record<TKey, string> = {
+  "desktop.controls": "Управление приложением",
+  "desktop.controlsHint": "Подключение клиента, остановка, перезапуск и полное обновление приложения доступны в окне управления.",
   "models.pickerOrder.label": "Порядок моделей",
   "models.pickerOrder.default": "По умолчанию",
   "models.pickerOrder.alphabetical": "По имени A–Z",

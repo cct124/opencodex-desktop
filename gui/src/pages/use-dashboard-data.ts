@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { isDesktopShell, openDesktopControls } from "../desktop-host";
 import { useKeyedClientResource } from "../client-resource";
 import { replaceHash } from "../hash-routing";
 import { useI18n } from "../i18n/shared";
@@ -772,6 +773,7 @@ export function useDashboardData(apiBase: string) {
   };
 
   const openUpdateDialog = () => {
+    if (isDesktopShell()) { openDesktopControls(); return; }
     const channel = defaultUpdateChannel(health?.version);
     setUpdateChannel(channel);
     setUpdateRestart(true);
@@ -814,6 +816,7 @@ export function useDashboardData(apiBase: string) {
   }, []);
 
   const runUpdate = async () => {
+    if (isDesktopShell()) { openDesktopControls(); return; }
     if (!updateCheck?.canUpdate) return;
     setUpdateError(null);
     try {

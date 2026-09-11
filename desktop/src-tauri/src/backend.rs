@@ -78,6 +78,11 @@ pub fn spawn(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let run = || -> Result<(), Box<dyn std::error::Error>> {
+            crate::resources::validate_root(
+                &repo,
+                env!("CARGO_PKG_VERSION"),
+                !cfg!(debug_assertions),
+            )?;
             let bun = repo.join("node_modules/bun/bin/bun.exe");
             if !bun.is_file() {
                 return Err("缺少项目内 Bun，请先完成依赖安装。".into());

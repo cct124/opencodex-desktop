@@ -6,13 +6,32 @@
 
 ## 当前阶段
 
-已完成 M0 源码基线、M1 独立窗口、M2 托盘生命周期，以及 M3 的持久化配置和 Codex 接入。窗口加载本项目后端的原有管理界面；完整系统功能适配和安装包仍在后续阶段。
+已实现 M0 源码基线、M1 独立窗口、M2 托盘生命周期、M3 持久化配置和 Codex 接入，以及 Windows x64 安装包构建。窗口加载原有完整管理界面，系统操作转到桌面控制页。安装包仍为待验收的开发产物，尚未发布稳定版本。
 
 - 上游：<https://github.com/lidge-jun/opencodex>
 - 起点：`v2.50.0`
 - 提交：`2d4d7a22381a2e497c2442902104619e25f937c7`
-- 本地开发分支：`desktop/main`
-- `upstream` 指向官方仓库；`origin` 指向公开 fork <https://github.com/cct124/opencodex-desktop>。
+- 桌面集成分支：`desktop/main`
+- 公开 fork：<https://github.com/cct124/opencodex-desktop>。
+
+## Windows 安装包
+
+从仓库根目录在 PowerShell 中构建（需先安装根目录和 GUI 的锁定依赖，以及 Rust / Windows C++ 构建工具）：
+
+```powershell
+& .\node_modules\bun\bin\bun.exe install --cwd desktop --frozen-lockfile
+cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+& .\node_modules\bun\bin\bun.exe run desktop/scripts/build-installer.ts
+& .\node_modules\bun\bin\bun.exe run desktop/scripts/package-smoke.ts
+```
+
+输出为 `desktop/src-tauri/target/release/bundle/nsis/OpenCodex Desktop_<version>_x64-setup.exe` 和同名 `.sha256`。固定 Tauri CLI、Rust 锁文件和 Bun 版本；生成脚本从允许列表复制资源、安装生产依赖并收集许可文件，不携带工作区配置、日志或开发笔记。`desktop-manifest.json` 用于构建与验收时检查资源哈希；程序启动时检查必需文件和版本，不将该清单宣称为数字签名。
+
+安装后从开始菜单启动，无需源码目录或全局 Node.js、Bun、OpenCodex。当前为未签名开发安装包。安装仅针对当前用户；没有 WebView2 的电脑需要联网运行内置 Microsoft 引导程序。
+
+升级、重装和卸载前需从托盘退出，等待配置恢复完成。安装程序不会强行终止运行中的桌面进程，不允许降级。升级和默认卸载保留应用数据；交互式卸载可明确勾选删除数据。桌面控制页提供 Releases 链接，使用完整安装包手动更新。开机启动和全局服务尚未接入。
+
+管理页面的系统操作打开桌面控制页；如需重启 Codex，请先完成当前轮次，再手动重启。导出保存到 `Downloads/OpenCodex Desktop/`，控制页可打开下载目录。文件名带唯一前缀以避免覆盖。
 
 ## 启动与配置
 
@@ -41,7 +60,7 @@ Windows 数据默认保存在 `%LOCALAPPDATA%/me.opencodex.desktop/`：
 
 首次需要完成 [基线依赖安装和 GUI 构建](../devlog/_plan/260911_tauri_desktop/020_baseline.md)，并安装 Rust、Windows C++ 构建工具及 WebView2。脚本按 `Cargo.lock` 构建，以 `--preview` 启动独立会话。
 
-当前 exe 仍依赖本源码目录中的 Bun、后端和 GUI 产物；不能单独复制给其他机器当作完整应用。预览和持久化模式共享单实例入口，切换模式前请退出已有实例。
+debug exe 依赖本源码目录中的 Bun、后端和 GUI 产物；release 安装包从安装目录的 `runtime/` 加载资源。两种 exe 都不能脱离各自资源单独复制给其他机器。预览和持久化模式共享单实例入口，切换模式前请退出已有实例。release 构建不接受开发预览或测试参数。
 
 当前预览的行为：
 
@@ -53,7 +72,7 @@ Windows 数据默认保存在 `%LOCALAPPDATA%/me.opencodex.desktop/`：
 - 托盘菜单提供代理和 Codex 路由状态、启动、重启、原生停止与恢复操作、桌面控制页、日志目录和明确的退出入口。
 - 停止代理保留应用和托盘；重启等待旧后端完成排空和配置清理，再创建新后端；退出同时停止本应用的后端。
 - 后端异常退出时显示错误和重试入口，由用户手动启动恢复，不自动循环拉起。
-- 全局安装、更新、系统重启及集成切换入口在开发预览中返回明确提示，后续由桌面生命周期统一接入。
+- 全局安装、更新和系统重启入口转到桌面控制页；集成切换由管理 API 返回明确提示，Codex 连接与恢复通过桌面控制页执行。
 - 启动失败可在控制页查看并打开日志目录；每次后端启动分别保存 `backend-1.log`、`backend-2.log` 等日志，另有不含凭据的 `desktop-status.json`。
 
 预览模式下，同一次应用会话内停止、启动、重启和崩溃后重试复用配置；完全退出再启动创建新会话。持久化模式始终复用固定数据目录。
@@ -97,4 +116,4 @@ Windows 数据默认保存在 `%LOCALAPPDATA%/me.opencodex.desktop/`：
 
 以一个产品、一套版本和一个安装包交付。允许必要的上游代码修改，保持改动集中、可解释；暂不拆分独立仓库、通用后端 SDK 或新的业务通信协议。
 
-实施步骤和验收范围见 [桌面增强计划](../devlog/_plan/260911_tauri_desktop/010_plan.md)，基线窗口验证见 [M1 验证记录](../devlog/_plan/260911_tauri_desktop/030_m1.md)，托盘和生命周期验证见 [M2 验证记录](../devlog/_plan/260911_tauri_desktop/040_m2.md)。
+实施步骤和验收范围见 [桌面增强计划](../devlog/_plan/260911_tauri_desktop/010_plan.md)，基线窗口验证见 [M1 验证记录](../devlog/_plan/260911_tauri_desktop/030_m1.md)，托盘和生命周期验证见 [M2 验证记录](../devlog/_plan/260911_tauri_desktop/040_m2.md)，安装包、回归对照和待验收项见 [M3 分发记录](../devlog/_plan/260911_tauri_desktop/060_m3_distribution.md)。

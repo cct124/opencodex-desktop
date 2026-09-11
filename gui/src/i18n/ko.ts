@@ -4,6 +4,8 @@ import type { TKey } from "./en";
  * Korean i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ko: Record<TKey, string> = {
+  "desktop.controls": "데스크톱 제어",
+  "desktop.controlsHint": "클라이언트 연결, 중지, 재시작 및 전체 앱 업데이트는 데스크톱 제어 화면에서 관리합니다.",
   "models.pickerOrder.label": "모델 선택 순서",
   "models.pickerOrder.default": "기본값",
   "models.pickerOrder.alphabetical": "모델 이름순",

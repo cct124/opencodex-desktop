@@ -4,6 +4,8 @@ import type { TKey } from "./en";
  * Japanese i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ja: Record<TKey, string> = {
+  "desktop.controls": "デスクトップ操作",
+  "desktop.controlsHint": "クライアント接続、停止、再起動、アプリ全体の更新はデスクトップ操作画面で管理します。",
   "models.pickerOrder.label": "モデル選択順",
   "models.pickerOrder.default": "デフォルト",
   "models.pickerOrder.alphabetical": "モデル名のA–Z順",

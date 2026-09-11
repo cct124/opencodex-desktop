@@ -87,6 +87,60 @@ fn lifecycle_check(app: &tauri::AppHandle, steps: &mut Vec<&str>) -> Result<(), 
             .unwrap();
         a.get_webview_window(&label)
             .unwrap()
+            .eval("document.querySelector('.main .notice button')?.click();")
+    })?
+    .map_err(|e| e.to_string())?;
+    let until = Instant::now() + Duration::from_secs(10);
+    while !on_ui(app, |a| {
+        a.get_webview_window("launcher")
+            .unwrap()
+            .is_visible()
+            .unwrap_or(false)
+    })? {
+        if Instant::now() > until {
+            return Err("Dashboard control link did not open the launcher".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if status(app).backend_pid != first.backend_pid {
+        return Err("Opening desktop controls restarted the backend".into());
+    }
+    steps.push("dashboard_control_link_opens_local_controls_without_host_mutation");
+    on_ui(app, |a| show_window(a, false))?;
+    on_ui(app, |a| {
+        let label = a.state::<DesktopState>().model.lock().unwrap().dashboard_label.clone().unwrap();
+        a.get_webview_window(&label).unwrap().eval("const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['desktop-download-ok'], {type: 'text/plain'})); a.download = 'desktop-smoke.txt'; document.body.append(a); a.click(); a.remove();")
+    })?.map_err(|e| e.to_string())?;
+    let downloads = crate::downloads::directory(app)?;
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        let downloaded = fs::read_dir(&downloads)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .any(|entry| {
+                fs::read_to_string(entry.path()).ok().as_deref() == Some("desktop-download-ok")
+            });
+        if downloaded {
+            break;
+        }
+        if Instant::now() > until {
+            return Err("WebView2 blob export did not reach the isolated downloads folder".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    steps.push("webview_blob_export_reaches_isolated_downloads");
+
+    on_ui(app, |a| {
+        let label = a
+            .state::<DesktopState>()
+            .model
+            .lock()
+            .unwrap()
+            .dashboard_label
+            .clone()
+            .unwrap();
+        a.get_webview_window(&label)
+            .unwrap()
             .close()
             .map_err(|e| e.to_string())
     })??;

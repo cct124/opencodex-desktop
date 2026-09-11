@@ -5,6 +5,8 @@ import type { TKey } from "./en";
  * Turkish i18n catalog. Must match the `TKey` set (compile-checked).
  */
 export const tr: Record<TKey, string> = {
+  "desktop.controls": "Masaüstü denetimleri",
+  "desktop.controlsHint": "İstemci bağlantısını, durdurmayı, yeniden başlatmayı ve tüm uygulama güncellemelerini masaüstü denetimlerinden yönetin.",
   "models.pickerOrder.label": "Model sırası",
   "models.pickerOrder.default": "Varsayılan",
   "models.pickerOrder.alphabetical": "Model adına göre A–Z",

@@ -1,8 +1,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod backend;
+mod downloads;
 mod lifecycle;
 mod profile;
+mod resources;
 #[cfg(debug_assertions)]
 mod smoke;
 
@@ -390,17 +392,29 @@ fn open_dashboard(app: &tauri::AppHandle, url: tauri::Url, generation: u64) -> t
     let navigation_app = app.clone();
     let external_app = app.clone();
     let page_app = app.clone();
+    let download_origin = origin.ascii_serialization();
     let state = app.state::<DesktopState>();
     let label = format!("dashboard-{generation}");
     state.model.lock().unwrap().dashboard_label = Some(label.clone());
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
-        .title("OpenCodex Desktop · 开发预览（关闭窗口后驻留托盘）")
+        .title(if state.profile.persistent {
+            "OpenCodex Desktop"
+        } else {
+            "OpenCodex Desktop · 开发预览"
+        })
+        .initialization_script("Object.defineProperty(window, '__OCX_DESKTOP__', { value: true });")
         .inner_size(1320.0, 860.0)
         .min_inner_size(960.0, 640.0)
         .visible(false)
         .data_directory(state.profile.root.join("webview"))
         .on_navigation(move |target| {
             if target.origin() == origin {
+                if target.path() == "/desktop-controls" {
+                    let app = navigation_app.clone();
+                    let target_app = app.clone();
+                    let _ = app.run_on_main_thread(move || show_window(&target_app, true));
+                    return false;
+                }
                 return true;
             }
             if matches!(target.scheme(), "http" | "https") {
@@ -417,6 +431,36 @@ fn open_dashboard(app: &tauri::AppHandle, url: tauri::Url, generation: u64) -> t
                     .open_url(target.as_str(), None::<&str>);
             }
             tauri::webview::NewWindowResponse::Deny
+        })
+        .on_download(move |webview, event| {
+            match event {
+                tauri::webview::DownloadEvent::Requested { url, destination } => {
+                    if !downloads::allowed_url(&url, &download_origin) {
+                        return false;
+                    }
+                    match downloads::directory(webview.app_handle()) {
+                        Ok(directory) => {
+                            *destination = downloads::destination(&directory, destination)
+                        }
+                        Err(_) => return false,
+                    }
+                }
+                tauri::webview::DownloadEvent::Finished { success, .. } => {
+                    let app = webview.app_handle().clone();
+                    let target = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        target.state::<DesktopState>().model.lock().unwrap().message = if success {
+                            "导出完成，可从桌面控制页打开下载目录。"
+                        } else {
+                            "导出失败，请重试并检查下载目录是否可写。"
+                        }
+                        .into();
+                        refresh(&target);
+                    });
+                }
+                _ => {}
+            }
+            true
         })
         .on_page_load(move |_, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished
@@ -511,6 +555,19 @@ fn action(app: &tauri::AppHandle, name: &str) {
             let _ = app.opener().open_path(path, None::<&str>);
         }
         "quit" => request_stop(app, Intent::Exit),
+        "updates" => {
+            let _ = app.opener().open_url(
+                "https://github.com/cct124/opencodex-desktop/releases",
+                None::<&str>,
+            );
+        }
+        "downloads" => {
+            if let Ok(directory) = downloads::directory(app) {
+                let _ = app
+                    .opener()
+                    .open_path(directory.display().to_string(), None::<&str>);
+            }
+        }
         "logs" => {
             let path = app.state::<DesktopState>().session.display().to_string();
             if let Err(error) = app.opener().open_path(path, None::<&str>) {
@@ -593,6 +650,8 @@ fn desktop_action(
         "data",
         "logs",
         "quit",
+        "updates",
+        "downloads",
     ]
     .contains(&name.as_str())
     {
@@ -689,9 +748,7 @@ fn main() {
             desktop_import_config
         ])
         .setup(|app| {
-            let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .canonicalize()?;
+            let repo = resources::runtime_root(app.handle())?;
             let profile = profile::Profile::create(app.handle(), &repo)?;
             let session = profile.session.clone();
             app.manage(DesktopState {

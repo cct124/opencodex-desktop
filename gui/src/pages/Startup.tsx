@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconRefresh } from "../icons";
+import { isDesktopShell, openDesktopControls } from "../desktop-host";
 import { type TFn, useI18n } from "../i18n/shared";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { Notice } from "../ui";
@@ -266,6 +267,7 @@ export default function Startup({ apiBase, machineApiBase = apiBase, connected =
   };
 
   const runTrayAction = async (action: "install" | "start" | "stop" | "uninstall") => {
+    if (isDesktopShell()) { openDesktopControls(); return; }
     setTrayBusy(true);
     setTrayError(false);
     try {
@@ -378,7 +380,7 @@ export default function Startup({ apiBase, machineApiBase = apiBase, connected =
             loading={loading}
             installBusy={installBusy}
             installResult={installResult}
-            onInstall={(action, opts) => { void runInstallAction(action, opts); }}
+            onInstall={(action, opts) => { if (isDesktopShell()) openDesktopControls(); else void runInstallAction(action, opts); }}
           />
           {data.platform === "win32" && (
             <StartupTraySection

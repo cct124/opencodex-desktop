@@ -2,6 +2,8 @@ import type { TKey } from "./en";
 
 /** Traditional Chinese (Taiwan) UI strings — keys must match `en.ts` 1:1. */
 export const zhTW: Record<TKey, string> = {
+  "desktop.controls": "桌面控制",
+  "desktop.controlsHint": "用戶端連線、停止、重新啟動及完整應用程式更新由桌面控制頁統一管理。",
   "models.pickerOrder.label": "模型選擇順序",
   "models.pickerOrder.default": "預設",
   "models.pickerOrder.alphabetical": "依模型名稱 A–Z",

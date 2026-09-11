@@ -33,6 +33,9 @@ describe("desktop preview host actions", () => {
       });
       expect(response?.status).toBe(409);
       expect(called).toBe(false);
+      const stopUrl = new URL("http://127.0.0.1:12345/api/stop");
+      const stop = await handleManagementAPI(new Request(stopUrl, { method: "POST", headers: { Host: stopUrl.host } }), stopUrl, getDefaultConfig());
+      expect(stop?.status).toBe(409);
     } finally {
       if (previous === undefined) delete process.env.OPENCODEX_DESKTOP_PREVIEW;
       else process.env.OPENCODEX_DESKTOP_PREVIEW = previous;
@@ -46,7 +49,7 @@ describe("desktop preview host actions", () => {
     expect(desktopPreviewBlocksHostAction("POST", "/v1/responses", true)).toBe(false);
   });
   test("blocks global installation, lifecycle actions and integration ownership changes", () => {
-    for (const path of ["/api/update/run", "/api/startup-action", "/api/windows-tray", "/api/system/restart", "/api/system/codex-restart", "/api/claude-desktop/apply", "/api/client-integrations/codex", "/api/client-integrations/aside/profiles/1/restore"]) {
+    for (const path of ["/api/stop", "/api/update/run", "/api/startup-action", "/api/windows-tray", "/api/system/restart", "/api/system/codex-restart", "/api/claude-desktop/apply", "/api/client-integrations/codex", "/api/client-integrations/aside/profiles/1/restore"]) {
       expect(desktopPreviewBlocksHostAction("POST", path, true)).toBe(true);
       expect(desktopPreviewBlocksHostAction("PUT", path, true)).toBe(true);
     }

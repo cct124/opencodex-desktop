@@ -41,7 +41,8 @@ impl Profile {
                 session,
             });
         }
-        let preview = std::env::args().any(|arg| arg == "--preview" || arg.starts_with("--smoke-"));
+        let preview = cfg!(debug_assertions)
+            && std::env::args().any(|arg| arg == "--preview" || arg.starts_with("--smoke-"));
         let name = format!(
             "session-{}-{}",
             std::process::id(),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "./i18n/shared";
 import { requestCodexRestart } from "./codex-restart";
 import type { CodexRestartCode } from "./codex-restart";
+import { isDesktopShell, openDesktopControls } from "./desktop-host";
 
 export interface CodexRestartController {
   restarting: boolean;
@@ -61,6 +62,7 @@ export function useCodexRestart(
   }, []);
 
   const restart = useCallback(async (): Promise<CodexRestartCode | null> => {
+    if (isDesktopShell()) { openDesktopControls(); return null; }
     if (!confirm(t("dash.codexRestartConfirm"))) return null;
     setRestarting(true);
     const outcome = await requestCodexRestart(apiBase, {
@@ -95,4 +97,3 @@ export function useCodexRestart(
 
   return { restarting, restart };
 }
-

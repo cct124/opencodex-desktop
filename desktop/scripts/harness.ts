@@ -4,12 +4,12 @@ import { join, resolve } from "node:path";
 export const repo = resolve(import.meta.dir, "../..");
 
 /** Persistent-mode integration harness. Callers always provide their own client fixture. */
-export async function launchPersistent(root: string, codex: string, source: string) {
+export async function launchPersistent(root: string, codex: string, source: string, runtimeRepo = repo, executable = process.execPath, env = process.env) {
   const session = join(root, "runs", `${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(session, { recursive: true });
-  const child = Bun.spawn([process.execPath, join(repo, "desktop/runtime/entry.ts"), session,
+  const child = Bun.spawn([executable, join(runtimeRepo, "desktop/runtime/entry.ts"), session,
     "--persistent", "--data-root", root, "--codex-home", codex, "--source-config", source],
-  { cwd: repo, stdin: "pipe", stdout: "pipe", stderr: Bun.file(join(session, "stderr.log")), windowsHide: true });
+  { cwd: runtimeRepo, env, stdin: "pipe", stdout: "pipe", stderr: Bun.file(join(session, "stderr.log")), windowsHide: true });
   const events: Record<string, any>[] = [];
   const log: string[] = [];
   const output = (async () => {

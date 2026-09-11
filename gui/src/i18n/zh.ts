@@ -4,6 +4,8 @@ import type { TKey } from "./en";
  * Chinese i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const zh: Record<TKey, string> = {
+  "desktop.controls": "桌面控制",
+  "desktop.controlsHint": "客户端连接、停止、重启和整包更新由桌面控制页统一管理。",
   "models.pickerOrder.label": "模型选择顺序",
   "models.pickerOrder.default": "默认",
   "models.pickerOrder.alphabetical": "按模型名 A–Z",

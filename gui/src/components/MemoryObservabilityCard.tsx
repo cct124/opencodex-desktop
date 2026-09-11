@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { formatUptime } from "../formatUptime";
+import { isDesktopShell, openDesktopControls } from "../desktop-host";
 import { IconActivity } from "../icons";
 import { useI18n, type Locale, type TFn } from "../i18n/shared";
 import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
@@ -356,6 +357,7 @@ export default function MemoryObservabilityCard({ apiBase }: { apiBase: string }
   }, [apiBase, restartPhase, restartFromPid, t]);
 
   const confirmRestart = () => {
+    if (isDesktopShell()) { openDesktopControls(); return; }
     const count = data?.activeTurnCount ?? 0;
     const lines = [
       t("dash.mem.restartConfirm", { count, seconds: DRAIN_TIMEOUT_S }),

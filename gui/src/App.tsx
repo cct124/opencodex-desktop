@@ -23,6 +23,8 @@ import { readModelsTab, type ModelsTab } from "./pages/models-tab";
 import { useAppRouteState } from "./use-app-route-state";
 import { requestProxyStop } from "./stop-proxy";
 import { useCodexRestart } from "./use-codex-restart";
+import { isDesktopShell, openDesktopControls } from "./desktop-host";
+import { DesktopNotice } from "./components/desktop-notice";
 
 type Theme = "light" | "dark" | "system";
 
@@ -219,6 +221,7 @@ export default function App() {
   });
 
   const handleStop = async () => {
+    if (isDesktopShell()) { openDesktopControls(); return; }
     if (!confirm(t(targets.connected ? "connection.disconnectConfirm" : "dash.stopConfirm"))) return;
     setStopping(true);
     const outcome = await requestProxyStop(machineBase, {
@@ -381,6 +384,7 @@ export default function App() {
           <SidebarGithubRow
             apiBase={sharedBase}
             onOpenUpdate={() => {
+              if (isDesktopShell()) { openDesktopControls(); return; }
               // The update dialog lives on the dashboard maintenance panel. Deep-link to
               // `#dashboard/update` and let the dashboard own the check/run flow — no
               // cross-component event bus, and the link survives a refresh.
@@ -418,6 +422,7 @@ export default function App() {
                   dashboard over a plane they never turned on. The requests that actually
                   need the machine plane report their own errors.
                 */}
+                <DesktopNotice />
                 {targetError && (
                   <div className="alert alert-err" role="alert">{t("connection.machineUnavailable")}</div>
                 )}

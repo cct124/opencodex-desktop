@@ -4,6 +4,8 @@ import type { TKey } from "./en";
  * French i18n catalog. Must match the `TKey` set.
  */
 export const fr: Record<TKey, string> = {
+  "desktop.controls": "Commandes de bureau",
+  "desktop.controlsHint": "Gérez la connexion du client, l’arrêt, le redémarrage et les mises à jour complètes depuis les commandes de bureau.",
   "models.pickerOrder.label": "Ordre des modèles",
   "models.pickerOrder.default": "Par défaut",
   "models.pickerOrder.alphabetical": "A–Z par modèle",

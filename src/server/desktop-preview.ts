@@ -2,6 +2,7 @@
 // operations target global installation/process state or transfer that ownership.
 // The normal CLI and production proxy are unaffected unless explicitly opted in.
 const HOST_ACTIONS = new Set([
+  "/api/stop",
   "/api/startup-action",
   "/api/windows-tray",
   "/api/update/run",

@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": { "../.bundle/runtime/": "runtime/" },
+    "icon": ["../.bundle/icon.ico"],
+    "publisher": "OpenCodex Desktop contributors",
+    "licenseFile": "../../LICENSE",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true,
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  }
+}

@@ -6,6 +6,8 @@
  * `{var}` are plain interpolations.
  */
 export const en = {
+  "desktop.controls": "Desktop controls",
+  "desktop.controlsHint": "Use desktop controls for client connection, stop, restart and whole-app updates.",
   "models.pickerOrder.label": "Picker order",
   "models.pickerOrder.default": "Default",
   "models.pickerOrder.alphabetical": "A–Z by model",

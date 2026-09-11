@@ -5,6 +5,8 @@ import type { TKey } from "./en";
  * German i18n catalog, generated from en.ts. Must match the `TKey` set (compile-checked).
  */
 export const de: Record<TKey, string> = {
+  "desktop.controls": "Desktop-Steuerung",
+  "desktop.controlsHint": "Verwalten Sie Client-Verbindungen, Stoppen, Neustarts und vollständige App-Updates in der Desktop-Steuerung.",
   "models.pickerOrder.label": "Modellreihenfolge",
   "models.pickerOrder.default": "Standard",
   "models.pickerOrder.alphabetical": "A–Z nach Modell",
