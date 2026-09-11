@@ -10,6 +10,10 @@ const session = mkdtempSync(join(sessions, "smoke-"));
 const protectedPaths = [join(homedir(), ".opencodex", "config.json"), join(homedir(), ".codex", "config.toml")];
 const fingerprint = (path: string) => existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : null;
 const before = protectedPaths.map(fingerprint);
+// This listener belongs to the test, not to any existing user service.
+const occupied = process.argv.includes("--occupied-port") ? Bun.serve({
+  hostname: "127.0.0.1", port: 10100, fetch: () => new Response("desktop-port-owner"),
+}) : undefined;
 const child = Bun.spawn([process.execPath, join(repo, "desktop/runtime/entry.ts"), session], {
   cwd: repo, stdin: "pipe", stdout: "pipe", stderr: Bun.file(join(session, "stderr.log")), windowsHide: true,
 });
@@ -33,6 +37,7 @@ try {
     }
   }
   const response = await fetch(dashboard!, { signal: AbortSignal.timeout(3000) });
+  if (occupied && new URL(dashboard!).port === String(occupied.port)) throw new Error("Backend attached to the occupied default port");
   const html = await response.text();
   if (!response.ok || !html.includes('<div id="root">')) throw new Error("Original GUI did not load");
   // Continue consuming output so a full pipe cannot prevent graceful shutdown.
@@ -43,8 +48,10 @@ try {
   if (code !== 0) throw new Error(`Backend shutdown returned ${code}; logs: ${session}`);
   if (existsSync(join(session, ".opencodex", "runtime-port.json"))) throw new Error("Owned runtime record was not cleaned up");
   if (JSON.stringify(before) !== JSON.stringify(protectedPaths.map(fingerprint))) throw new Error("Real client configuration changed");
-  console.log(JSON.stringify({ ok: true, entry: "project Bun + source CLI", gui: response.status, gracefulExit: code, parentEof: process.argv.includes("--parent-eof"), realConfigUnchanged: true, session }));
+  if (occupied && await (await fetch(`http://127.0.0.1:${occupied.port}`, { signal: AbortSignal.timeout(3000) })).text() !== "desktop-port-owner") throw new Error("Other port owner was affected by shutdown");
+  console.log(JSON.stringify({ ok: true, entry: "project Bun + source CLI", gui: response.status, gracefulExit: code, parentEof: process.argv.includes("--parent-eof"), occupiedPortUnaffected: !!occupied, realConfigUnchanged: true, session }));
 } finally {
   clearTimeout(timer);
   if (child.exitCode === null) { child.stdin.end(); await Promise.race([child.exited, Bun.sleep(15000)]); if (child.exitCode === null) child.kill(); }
+  await occupied?.stop(true);
 }

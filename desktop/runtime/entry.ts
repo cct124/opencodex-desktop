@@ -1,15 +1,17 @@
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { isolatedEnvironment, prepareDirectories } from "./environment";
 import { ownedBackendReady } from "./readiness";
+import { preparePreviewConfig } from "./profile";
+import { RoutingGate, runRoutingCommand, type RoutingAction } from "./routing";
 
 const repo = realpathSync(resolve(import.meta.dir, "../.."));
 const session = realpathSync(process.argv[2] ?? "");
 const sessionRelative = relative(join(repo, ".tmp", "desktop"), session);
 if (!sessionRelative || sessionRelative.startsWith("..") || resolve(join(repo, ".tmp", "desktop"), sessionRelative) !== session) {
-  throw new Error("Desktop runtime requires a new session inside this project's .tmp/desktop directory.");
+  throw new Error("Desktop runtime requires a session inside this project's .tmp/desktop directory.");
 }
 const prefix = "OCX_DESKTOP_EVENT ";
 function report(event: Record<string, unknown>): void {
@@ -24,17 +26,7 @@ process.env.OCX_BUN_RUNTIME_SOURCE = "bundled";
 process.env.OCX_BUN_RUNTIME_PATH = process.execPath;
 
 const configPath = join(env.OPENCODEX_HOME!, "config.json");
-if (existsSync(configPath)) throw new Error("Desktop preview requires a fresh session profile.");
-writeFileSync(configPath, JSON.stringify({
-  port: 10100,
-  hostname: "127.0.0.1",
-  providers: {},
-  defaultProvider: "openai",
-  codexAutoStart: false,
-  codexShimAutoRestore: false,
-  clientIntegrations: { codex: false, grok: false, "claude-desktop": false },
-  claudeCode: { enabled: false, systemEnv: false },
-}), { flag: "wx" });
+const { shutdownTimeoutMs } = preparePreviewConfig(configPath, process.argv[3] === "--resume-codex");
 
 const port = await new Promise<number>((accept, reject) => {
   const reservation = createServer();
@@ -49,10 +41,13 @@ const port = await new Promise<number>((accept, reject) => {
 process.argv = [process.execPath, join(repo, "src", "cli", "index.ts"), "start", "--port", String(port)];
 
 let stopping = false;
+let ready = false;
+let shutdownAdmitted = false;
+const routingGate = new RoutingGate();
 let signalSent = false;
 let stopTimer: ReturnType<typeof setTimeout> | undefined;
 function deliverShutdown(): void {
-  if (!stopping || signalSent || process.listenerCount("SIGINT") === 0) return;
+  if (!shutdownAdmitted || signalSent || process.listenerCount("SIGINT") === 0) return;
   signalSent = true;
   process.emit("SIGINT");
 }
@@ -60,18 +55,52 @@ function stop(): void {
   if (stopping) return;
   stopping = true;
   report({ type: "stopping" });
-  // Windows termination does not reliably dispatch POSIX signals. Invoke the CLI's actual handler in-process.
-  deliverShutdown();
-  stopTimer = setTimeout(() => process.exit(1), 12000);
+  void routingGate.close().finally(() => {
+    // Finish admitted routing writes before upstream shutdown restores native state.
+    shutdownAdmitted = true;
+    deliverShutdown();
+    stopTimer = setTimeout(() => process.exit(1), shutdownTimeoutMs + 15000);
+  });
+}
+let lastRouting: string | undefined;
+async function reportRouting(success?: boolean, message?: string): Promise<void> {
+  const { getCodexRoutingKind } = await import("../../src/codex/inject");
+  const routing = getCodexRoutingKind();
+  if (routing !== lastRouting || success !== undefined) {
+    lastRouting = routing;
+    report({ type: "routing", routing, success, message });
+  }
+}
+const routingTimer = setInterval(() => { if (ready && !stopping) void reportRouting().catch(() => {}); }, 1000);
+routingTimer.unref();
+function switchRouting(action: RoutingAction): void {
+  if (!ready || stopping) return;
+  routingGate.run(async () => {
+    try {
+      const runtime = JSON.parse(readFileSync(join(env.OPENCODEX_HOME!, "runtime-port.json"), "utf8"));
+      if (runtime.pid !== process.pid || runtime.port !== port || !await ownedBackendReady(port, process.pid, runtime.attestationSecret)) {
+        await reportRouting(false, "当前代理身份或就绪检查失败，未修改 Codex 配置。");
+        return;
+      }
+      const result = await runRoutingCommand(repo, action);
+      await reportRouting(result.success, result.message);
+    } catch (error) {
+      console.error(error);
+      report({ type: "routing", routing: "unknown", success: false, message: "Codex 切换失败，请查看后端日志。" });
+    }
+  });
 }
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => {
   input += chunk;
   if (input.length > 1024) return stop();
-  if (input.includes("\n")) {
-    if (input.trim() === "shutdown") stop();
-    input = "";
+  while (input.includes("\n")) {
+    const end = input.indexOf("\n");
+    const command = input.slice(0, end).trim();
+    input = input.slice(end + 1);
+    if (command === "shutdown") stop();
+    else if (command === "restore" || command === "restore-back") switchRouting(command);
   }
 });
 process.stdin.on("end", stop);
@@ -85,7 +114,9 @@ async function awaitReady(): Promise<void> {
     try {
       const runtime = JSON.parse(readFileSync(join(env.OPENCODEX_HOME!, "runtime-port.json"), "utf8"));
       if (runtime.pid === process.pid && runtime.port === port && await ownedBackendReady(port, process.pid, runtime.attestationSecret)) {
+        ready = true;
         report({ type: "ready", url: `http://127.0.0.1:${port}/` });
+        await reportRouting();
         return;
       }
     } catch { /* runtime record and listener are created during CLI startup */ }

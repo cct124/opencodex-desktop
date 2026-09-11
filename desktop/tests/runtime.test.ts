@@ -5,6 +5,15 @@ import { createLocalAttestationProof, createLocalAttestationSecret, LOCAL_ATTEST
 import { join } from "node:path";
 
 describe("isolated desktop preview", () => {
+  test("uses normal Win32 paths for the PowerShell compiler's isolated temp directory", () => {
+    const root = "C:\\Desktop\\session";
+    const env = isolatedEnvironment("\\\\?\\" + root, "real-profile", {});
+    expect(env.HOME).toBe(root);
+    expect(env.TEMP).toBe(join(root, "temp"));
+    expect(env.CODEX_HOME).toBe(join(root, ".codex"));
+    expect(env.OCX_REAL_HOME).toBe("real-profile");
+  });
+
   test("redirects user directories and removes inherited provider, routing and service authority", () => {
     const session = join(import.meta.dir, "example-session");
     const env = isolatedEnvironment(session, "real-profile", { PATH: "tools", OPENCODEX_HOME: "live", CODEX_HOME: "live-codex", OCX_SERVICE: "1", OPENAI_API_KEY: "private", HTTP_PROXY: "foreign", CLAUDE_USER_DATA_DIR: "live-claude" });

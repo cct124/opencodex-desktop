@@ -1,139 +1,349 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use serde::{Deserialize, Serialize};
+mod backend;
+mod lifecycle;
+#[cfg(debug_assertions)]
+mod smoke;
+
+use lifecycle::{Completion, Intent, Lifecycle, Phase};
+use serde::Serialize;
 use std::{
-    fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    fs,
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, AtomicI32, Ordering},
-        Arc, Mutex,
-    },
+    sync::{mpsc::Sender, Mutex},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, WebviewUrl, WebviewWindowBuilder,
+};
 use tauri_plugin_opener::OpenerExt;
 
 #[derive(Clone, Serialize)]
 struct Status {
-    phase: String,
+    phase: Phase,
     message: String,
     log_path: String,
     page_loaded: bool,
+    generation: u64,
+    backend_pid: Option<u32>,
+    dashboard_url: Option<String>,
+    can_start: bool,
+    can_stop: bool,
+    can_restart: bool,
+    activation_count: u32,
+    codex_routing: String,
+    routing_busy: bool,
+    can_route: bool,
+}
+
+#[derive(Default)]
+struct Model {
+    lifecycle: Lifecycle,
+    message: String,
+    log_path: PathBuf,
+    control: Option<Sender<backend::Control>>,
+    backend_pid: Option<u32>,
+    dashboard_url: Option<String>,
+    dashboard_label: Option<String>,
+    page_loaded: bool,
+    wants_window: bool,
+    activation_count: u32,
+    exit_code: i32,
+    codex_routing: String,
+    routing_busy: bool,
+    // Only an explicit restart carries the previous route across native cleanup.
+    restart_resume_codex: bool,
 }
 
 struct DesktopState {
-    status: Mutex<Status>,
-    child: Mutex<Option<Child>>,
-    input: Mutex<Option<ChildStdin>>,
-    shutdown_at: Mutex<Option<Instant>>,
-    exiting: AtomicBool,
-    exit_code: AtomicI32,
+    repo: PathBuf,
+    session: PathBuf,
+    model: Mutex<Model>,
+}
+struct TrayItems {
+    status: MenuItem<tauri::Wry>,
+    start: MenuItem<tauri::Wry>,
+    stop: MenuItem<tauri::Wry>,
+    restart: MenuItem<tauri::Wry>,
+    routing_status: MenuItem<tauri::Wry>,
+    restore: MenuItem<tauri::Wry>,
+    restore_back: MenuItem<tauri::Wry>,
 }
 
-impl Default for DesktopState {
-    fn default() -> Self {
-        Self {
-            status: Mutex::new(Status {
-                phase: "starting".into(),
-                message: "正在启动项目内后端…".into(),
-                log_path: String::new(),
-                page_loaded: false,
-            }),
-            child: Mutex::new(None),
-            input: Mutex::new(None),
-            shutdown_at: Mutex::new(None),
-            exiting: AtomicBool::new(false),
-            exit_code: AtomicI32::new(0),
+fn status(app: &tauri::AppHandle) -> Status {
+    let state = app.state::<DesktopState>();
+    let model = state.model.lock().unwrap();
+    Status {
+        phase: model.lifecycle.phase,
+        message: model.message.clone(),
+        log_path: model.log_path.display().to_string(),
+        page_loaded: model.page_loaded,
+        generation: model.lifecycle.generation,
+        backend_pid: model.backend_pid,
+        dashboard_url: model.dashboard_url.clone(),
+        can_start: model.lifecycle.can_start(),
+        can_stop: model.lifecycle.can_stop(),
+        can_restart: model.lifecycle.can_restart() && !model.routing_busy,
+        activation_count: model.activation_count,
+        codex_routing: model.codex_routing.clone(),
+        routing_busy: model.routing_busy,
+        can_route: model.lifecycle.can_restart() && !model.routing_busy,
+    }
+}
+
+// Lifecycle mutations and window/menu operations run on Tauri's event loop.
+// Never hold a model lock while calling a native UI API.
+fn refresh(app: &tauri::AppHandle) {
+    let snapshot = status(app);
+    let state = app.state::<DesktopState>();
+    if let Ok(json) = serde_json::to_vec_pretty(&snapshot) {
+        let _ = fs::write(state.session.join("desktop-status.json"), json);
+    }
+    let label = match snapshot.phase {
+        Phase::Starting => "代理正在启动",
+        Phase::Ready => "代理已就绪，界面加载中",
+        Phase::Loaded => "代理正在运行",
+        Phase::Stopping => "代理正在停止",
+        Phase::Stopped => "代理已停止",
+        Phase::Error => "代理遇到问题",
+        Phase::Exiting => "应用正在退出",
+    };
+    if let Some(items) = app.try_state::<TrayItems>() {
+        let _ = items.status.set_text(label);
+        let _ = items.start.set_enabled(snapshot.can_start);
+        let _ = items.stop.set_enabled(snapshot.can_stop);
+        let _ = items.restart.set_enabled(snapshot.can_restart);
+        let routing = if snapshot.routing_busy {
+            "Codex：正在切换…"
+        } else {
+            match snapshot.codex_routing.as_str() {
+                "native" => "Codex：原生模式",
+                "opencodex-local" => "Codex：通过 OpenCodex 代理",
+                _ => "Codex：路由状态未确认",
+            }
+        };
+        let _ = items.routing_status.set_text(routing);
+        let _ = items.restore.set_enabled(snapshot.can_route);
+        let _ = items.restore_back.set_enabled(snapshot.can_route);
+    }
+    if let Some(tray) = app.tray_by_id("desktop") {
+        let _ = tray.set_tooltip(Some(format!("OpenCodex Desktop · {label}")));
+    }
+}
+
+fn show_window(app: &tauri::AppHandle, controls: bool) {
+    let label = {
+        let state = app.state::<DesktopState>();
+        let mut model = state.model.lock().unwrap();
+        model.wants_window = true;
+        if !controls && model.lifecycle.phase == Phase::Loaded {
+            model
+                .dashboard_label
+                .clone()
+                .unwrap_or_else(|| "launcher".into())
+        } else {
+            "launcher".into()
+        }
+    };
+    for (name, window) in app.webview_windows() {
+        if name == label {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        } else {
+            let _ = window.hide();
         }
     }
 }
 
-fn update_status(state: &DesktopState, phase: &str, message: &str) {
-    let mut status = state.status.lock().unwrap();
-    status.phase = phase.into();
-    status.message = message.into();
-    if phase == "loaded" {
-        status.page_loaded = true;
-    }
-    // A non-secret local record also lets the development smoke check observe native page load.
-    if !status.log_path.is_empty() {
-        let path = PathBuf::from(&status.log_path).with_file_name("desktop-status.json");
-        if let Ok(json) = serde_json::to_vec_pretty(&*status) {
-            let _ = fs::write(path, json);
-        }
-    }
-}
-
-fn show_error(app: &tauri::AppHandle, state: &DesktopState, message: &str) {
-    update_status(state, "error", message);
-    if let Some(window) = app.get_webview_window("dashboard") {
+fn hide_windows(app: &tauri::AppHandle) {
+    app.state::<DesktopState>()
+        .model
+        .lock()
+        .unwrap()
+        .wants_window = false;
+    for window in app.webview_windows().values() {
         let _ = window.hide();
     }
-    if let Some(window) = app.get_webview_window("launcher") {
-        let _ = window.show();
-        let _ = window.set_focus();
+}
+
+fn request_stop(app: &tauri::AppHandle, intent: Intent) {
+    let active = {
+        let state = app.state::<DesktopState>();
+        let mut model = state.model.lock().unwrap();
+        if model.lifecycle.phase == Phase::Exiting {
+            return;
+        }
+        model.restart_resume_codex =
+            intent == Intent::Restart && model.codex_routing == "opencodex-local";
+        model.lifecycle.stop(intent);
+        let message = match intent {
+            Intent::Restart => Some("正在排空请求，旧后端退出后将重新启动…"),
+            Intent::Exit => Some("正在停止代理并清理开发配置，完成后退出应用…"),
+            Intent::Stop => Some("正在排空请求并停止代理，桌面应用将继续驻留…"),
+            Intent::Failure => None,
+        };
+        if let Some(message) = message {
+            model.message = message.into();
+        }
+        if let Some(control) = &model.control {
+            let _ = control.send(backend::Control::Stop);
+        }
+        model.lifecycle.active
+    };
+    refresh(app);
+    if intent != Intent::Exit {
+        show_window(app, true);
+    }
+    if !active && intent == Intent::Exit {
+        let code = app.state::<DesktopState>().model.lock().unwrap().exit_code;
+        app.exit(code);
     }
 }
 
-fn stop_backend(state: &DesktopState) {
-    let mut requested = state.shutdown_at.lock().unwrap();
-    if requested.is_some() {
-        return;
-    }
-    *requested = Some(Instant::now());
-    if let Some(mut input) = state.input.lock().unwrap().take() {
-        let _ = input.write_all(b"shutdown\n");
-        let _ = input.flush();
-        // EOF is also a shutdown request, including if the desktop parent crashes.
-    }
+fn fail(app: &tauri::AppHandle, message: String) {
+    app.state::<DesktopState>().model.lock().unwrap().message = message;
+    request_stop(app, Intent::Failure);
 }
 
-fn request_exit(app: &tauri::AppHandle, state: &DesktopState) {
-    if state.exiting.swap(true, Ordering::SeqCst) {
-        return;
+fn start_backend(app: &tauri::AppHandle) {
+    let state = app.state::<DesktopState>();
+    let (generation, old_window, log_path, resume_codex) = {
+        let mut model = state.model.lock().unwrap();
+        let Some(generation) = model.lifecycle.start() else {
+            return;
+        };
+        model.message = "正在启动项目内后端并校验进程身份…".into();
+        model.backend_pid = None;
+        model.page_loaded = false;
+        model.dashboard_url = None;
+        model.codex_routing = "unknown".into();
+        model.routing_busy = false;
+        model.log_path = state.session.join(format!("backend-{generation}.log"));
+        (
+            generation,
+            model.dashboard_label.take(),
+            model.log_path.clone(),
+            std::mem::take(&mut model.restart_resume_codex),
+        )
+    };
+    if let Some(window) = old_window.and_then(|label| app.get_webview_window(&label)) {
+        let _ = window.destroy();
     }
-    update_status(state, "stopping", "正在停止后端并恢复开发配置…");
-    if state.child.lock().unwrap().is_none() {
-        app.exit(state.exit_code.load(Ordering::SeqCst));
-        return;
-    }
-    stop_backend(state);
+    refresh(app);
+    show_window(app, true);
+    let event_app = app.clone();
+    let control = backend::spawn(
+        state.repo.clone(),
+        state.session.clone(),
+        log_path,
+        resume_codex,
+        move |event| {
+            let app = event_app.clone();
+            let _ = event_app.run_on_main_thread(move || backend_event(&app, generation, event));
+        },
+    );
+    state.model.lock().unwrap().control = Some(control);
 }
 
-#[tauri::command]
-fn desktop_status(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, Arc<DesktopState>>,
-) -> Result<Status, String> {
-    if window.label() != "launcher" {
-        return Err("Only the local launcher may access desktop commands".into());
+fn backend_event(app: &tauri::AppHandle, generation: u64, event: backend::Event) {
+    let state = app.state::<DesktopState>();
+    {
+        let model = state.model.lock().unwrap();
+        if model.lifecycle.generation != generation || !model.lifecycle.active {
+            return;
+        }
     }
-    Ok(state.status.lock().unwrap().clone())
-}
-
-#[tauri::command]
-fn desktop_quit(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<DesktopState>>,
-) -> Result<(), String> {
-    if window.label() != "launcher" {
-        return Err("Only the local launcher may access desktop commands".into());
+    match event {
+        backend::Event::Started(pid) => {
+            state.model.lock().unwrap().backend_pid = Some(pid);
+        }
+        backend::Event::Ready(raw) => {
+            let Some(url) = backend_url(&raw) else {
+                fail(app, "后端返回了无效的本地地址，请查看日志。".into());
+                return;
+            };
+            {
+                let mut model = state.model.lock().unwrap();
+                if !model.lifecycle.ready(generation) {
+                    return;
+                }
+                model.dashboard_url = Some(raw);
+                model.message = "代理已就绪，正在加载管理界面…".into();
+            }
+            if let Err(error) = open_dashboard(app, url, generation) {
+                fail(app, format!("无法创建管理窗口：{error}"));
+            }
+        }
+        backend::Event::Error(message) => {
+            if state.model.lock().unwrap().lifecycle.can_stop() {
+                fail(app, message);
+            }
+        }
+        backend::Event::Routing {
+            routing,
+            success,
+            message,
+        } => {
+            {
+                let mut model = state.model.lock().unwrap();
+                model.codex_routing = routing;
+                // A startup status event must not acknowledge a later user operation.
+                if success.is_some() {
+                    model.routing_busy = false;
+                }
+                if let Some(message) = message {
+                    model.message = message;
+                }
+            }
+            if success == Some(false) {
+                show_window(app, true);
+            }
+        }
+        backend::Event::Finished { success, message } => {
+            let outcome = {
+                let mut model = state.model.lock().unwrap();
+                let earlier_error =
+                    (model.lifecycle.phase == Phase::Error).then(|| model.message.clone());
+                let outcome = model.lifecycle.finished(generation, success);
+                if outcome != Completion::Restart {
+                    model.restart_resume_codex = false;
+                }
+                model.control = None;
+                model.backend_pid = None;
+                model.routing_busy = false;
+                model.codex_routing = if success { "native" } else { "unknown" }.into();
+                model.message = if outcome == Completion::Error {
+                    format!(
+                        "{} {message} 请检查日志后手动启动重试。",
+                        earlier_error.unwrap_or_default()
+                    )
+                    .trim()
+                    .into()
+                } else {
+                    message
+                };
+                if outcome == Completion::Exit && !success {
+                    model.exit_code = 1;
+                }
+                outcome
+            };
+            refresh(app);
+            match outcome {
+                Completion::Restart => start_backend(app),
+                Completion::Exit => {
+                    let code = state.model.lock().unwrap().exit_code;
+                    app.exit(code);
+                }
+                Completion::Stopped | Completion::Error => show_window(app, true),
+                Completion::Stale => {}
+            }
+        }
     }
-    request_exit(&app, &state);
-    Ok(())
-}
-
-#[derive(Deserialize)]
-struct BackendEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    pid: u32,
-    url: Option<String>,
-    message: Option<String>,
+    refresh(app);
 }
 
 fn backend_url(raw: &str) -> Option<tauri::Url> {
@@ -149,25 +359,23 @@ fn backend_url(raw: &str) -> Option<tauri::Url> {
     .then_some(url)
 }
 
-fn open_dashboard(
-    app: &tauri::AppHandle,
-    state: Arc<DesktopState>,
-    url: tauri::Url,
-    session: &std::path::Path,
-) -> tauri::Result<()> {
-    let expected_origin = url.origin();
-    let page_origin = url.origin();
+fn open_dashboard(app: &tauri::AppHandle, url: tauri::Url, generation: u64) -> tauri::Result<()> {
+    let origin = url.origin();
+    let page_origin = origin.clone();
     let navigation_app = app.clone();
     let external_app = app.clone();
     let page_app = app.clone();
-    WebviewWindowBuilder::new(app, "dashboard", WebviewUrl::External(url))
-        .title("OpenCodex Desktop · 开发预览（独立配置）")
+    let state = app.state::<DesktopState>();
+    let label = format!("dashboard-{generation}");
+    state.model.lock().unwrap().dashboard_label = Some(label.clone());
+    WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        .title("OpenCodex Desktop · 开发预览（关闭窗口后驻留托盘）")
         .inner_size(1320.0, 860.0)
         .min_inner_size(960.0, 640.0)
         .visible(false)
-        .data_directory(session.join("webview"))
+        .data_directory(state.session.join("webview"))
         .on_navigation(move |target| {
-            if target.origin() == expected_origin {
+            if target.origin() == origin {
                 return true;
             }
             if matches!(target.scheme(), "http" | "https") {
@@ -177,7 +385,7 @@ fn open_dashboard(
             }
             false
         })
-        .on_new_window(move |target, _features| {
+        .on_new_window(move |target, _| {
             if matches!(target.scheme(), "http" | "https") {
                 let _ = external_app
                     .opener()
@@ -185,219 +393,262 @@ fn open_dashboard(
             }
             tauri::webview::NewWindowResponse::Deny
         })
-        .on_page_load(move |window, payload| {
-            if payload.event() == tauri::webview::PageLoadEvent::Finished
-                && payload.url().origin() == page_origin
-                && !state.exiting.load(Ordering::SeqCst)
-                && state.status.lock().unwrap().phase == "ready"
+        .on_page_load(move |_, payload| {
+            if payload.event() != tauri::webview::PageLoadEvent::Finished
+                || payload.url().origin() != page_origin
             {
-                update_status(&state, "loaded", "原有管理界面已在桌面窗口加载。");
-                let _ = window.show();
-                let _ = window.set_focus();
-                if let Some(launcher) = page_app.get_webview_window("launcher") {
-                    let _ = launcher.hide();
+                return;
+            }
+            let state = page_app.state::<DesktopState>();
+            let show = {
+                let mut model = state.model.lock().unwrap();
+                if !model.lifecycle.loaded(generation) {
+                    return;
                 }
+                model.page_loaded = true;
+                model.message = "代理正在运行。关闭窗口后继续驻留；可从系统托盘打开或退出。".into();
+                model.wants_window
+            };
+            refresh(&page_app);
+            if show {
+                show_window(&page_app, false);
             }
         })
         .build()?;
+    let timeout_app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(45));
+        let app = timeout_app.clone();
+        let _ = timeout_app.run_on_main_thread(move || {
+            let snapshot = status(&app);
+            if snapshot.generation == generation && snapshot.phase == Phase::Ready {
+                fail(&app, "管理界面加载超时，可查看日志后重试。".into());
+            }
+        });
+    });
     Ok(())
 }
 
-fn start_backend(
-    app: &tauri::AppHandle,
-    state: Arc<DesktopState>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // M1 is a source-checkout preview. Distribution will supply a resource-root instead.
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()?;
-    let bun = repo.join("node_modules/bun/bin/bun.exe");
-    if !bun.is_file() {
-        return Err("缺少项目内 Bun，请先完成项目依赖安装。".into());
-    }
-    if !repo.join("gui/dist/index.html").is_file() {
-        return Err("缺少管理界面，请先运行上游 build:gui。".into());
-    }
-    let session = repo.join(".tmp/desktop").join(format!(
-        "session-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    fs::create_dir_all(&session)?;
-    let log_path = session.join("backend.log");
-    let log = OpenOptions::new()
-        .create_new(true)
-        .append(true)
-        .open(&log_path)?;
-    state.status.lock().unwrap().log_path = log_path.display().to_string();
-    update_status(&state, "starting", "正在启动项目内后端并校验进程身份…");
-    let mut command = Command::new(&bun);
-    command
-        .arg(repo.join("desktop/runtime/entry.ts"))
-        .arg(&session)
-        .current_dir(&repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(log.try_clone()?));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    let mut child = command.spawn()?;
-    let pid = child.id();
-    let output = child.stdout.take().ok_or("Missing backend stdout")?;
-    *state.input.lock().unwrap() = child.stdin.take();
-    *state.child.lock().unwrap() = Some(child);
-
-    let output_app = app.clone();
-    let output_state = state.clone();
-    thread::spawn(move || {
-        let mut log = log;
-        for line in BufReader::new(output).lines() {
-            let Ok(line) = line else { break };
-            let _ = writeln!(log, "{line}");
-            let Some(raw) = line.strip_prefix("OCX_DESKTOP_EVENT ") else {
-                continue;
-            };
-            let Ok(event) = serde_json::from_str::<BackendEvent>(raw) else {
-                continue;
-            };
-            if event.pid != pid
-                || output_state.exiting.load(Ordering::SeqCst)
-                || output_state.child.lock().unwrap().is_none()
+fn action(app: &tauri::AppHandle, name: &str) {
+    let snapshot = status(app);
+    match name {
+        "open" => show_window(app, false),
+        "controls" => show_window(app, true),
+        "hide" => hide_windows(app),
+        "start" if snapshot.can_start => start_backend(app),
+        "stop" if snapshot.can_stop || snapshot.phase == Phase::Stopping => {
+            request_stop(app, Intent::Stop)
+        }
+        "restart" if snapshot.can_restart => request_stop(app, Intent::Restart),
+        "restore" | "restore-back" if snapshot.can_route => {
+            let state = app.state::<DesktopState>();
             {
-                continue;
-            }
-            match event.kind.as_str() {
-                "ready" => {
-                    let Some(url) = event.url.as_deref().and_then(backend_url) else {
-                        continue;
-                    };
-                    update_status(&output_state, "ready", "后端已就绪，正在加载管理界面…");
-                    if let Err(error) =
-                        open_dashboard(&output_app, output_state.clone(), url, &session)
-                    {
-                        show_error(
-                            &output_app,
-                            &output_state,
-                            &format!("无法创建管理窗口：{error}"),
-                        );
-                        stop_backend(&output_state);
+                let mut model = state.model.lock().unwrap();
+                let command = if name == "restore" {
+                    backend::Control::Restore
+                } else {
+                    backend::Control::RestoreBack
+                };
+                if model
+                    .control
+                    .as_ref()
+                    .is_some_and(|control| control.send(command).is_ok())
+                {
+                    model.routing_busy = true;
+                    model.message = if name == "restore" {
+                        "正在恢复原生 Codex，代理将保持运行…"
+                    } else {
+                        "正在将 Codex 接回当前代理…"
                     }
+                    .into();
+                } else {
+                    model.message = "无法向当前后端发送 Codex 切换请求。".into();
                 }
-                "error" => show_error(
-                    &output_app,
-                    &output_state,
-                    event.message.as_deref().unwrap_or("后端启动失败。"),
-                ),
-                _ => {}
+            }
+            refresh(app);
+        }
+        "quit" => request_stop(app, Intent::Exit),
+        "logs" => {
+            let path = app.state::<DesktopState>().session.display().to_string();
+            if let Err(error) = app.opener().open_path(path, None::<&str>) {
+                app.state::<DesktopState>().model.lock().unwrap().message =
+                    format!("无法打开日志目录：{error}");
+                refresh(app);
+                show_window(app, true);
             }
         }
-    });
+        _ => {}
+    }
+}
 
-    let monitor_app = app.clone();
-    thread::spawn(move || loop {
-        let deadline_exceeded = state
-            .shutdown_at
-            .lock()
-            .unwrap()
-            .is_some_and(|at| at.elapsed() > Duration::from_secs(15));
-        let result = {
-            let mut slot = state.child.lock().unwrap();
-            let Some(child) = slot.as_mut() else { break };
-            if deadline_exceeded {
-                let _ = child.kill();
-            }
-            match child.try_wait() {
-                Ok(Some(exit)) => {
-                    *slot = None;
-                    Some(exit.to_string())
+#[tauri::command]
+fn desktop_status(window: tauri::WebviewWindow, app: tauri::AppHandle) -> Result<Status, String> {
+    if window.label() != "launcher" {
+        return Err("Only the local launcher may access desktop commands".into());
+    }
+    Ok(status(&app))
+}
+
+#[tauri::command]
+fn desktop_action(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("Only the local launcher may access desktop commands".into());
+    }
+    if ![
+        "open",
+        "hide",
+        "start",
+        "stop",
+        "restart",
+        "restore",
+        "restore-back",
+        "logs",
+        "quit",
+    ]
+    .contains(&name.as_str())
+    {
+        return Err("Unknown desktop action".into());
+    }
+    let target = app.clone();
+    app.run_on_main_thread(move || action(&target, &name))
+        .map_err(|e| e.to_string())
+}
+
+fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let item = |id, text, enabled| MenuItem::with_id(app, id, text, enabled, None::<&str>);
+    let open = item("open", "打开主窗口", true)?;
+    let controls = item("controls", "桌面状态与控制", true)?;
+    let status = item("status", "代理正在启动", false)?;
+    let start = item("start", "启动代理", false)?;
+    let stop = item("stop", "停止代理并恢复原生 Codex", true)?;
+    let restart = item("restart", "重启代理", false)?;
+    let routing_status = item("routing-status", "Codex：路由状态未确认", false)?;
+    let restore = item("restore", "恢复原生 Codex（代理继续运行）", false)?;
+    let restore_back = item("restore-back", "将 Codex 重新接回当前代理", false)?;
+    let logs = item("logs", "打开日志目录", true)?;
+    let quit = item("quit", "退出应用并恢复原生 Codex", true)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let routing_separator = PredefinedMenuItem::separator(app)?;
+    let bottom = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &controls,
+            &separator,
+            &status,
+            &start,
+            &restart,
+            &routing_separator,
+            &routing_status,
+            &stop,
+            &restore,
+            &restore_back,
+            &bottom,
+            &logs,
+            &quit,
+        ],
+    )?;
+    TrayIconBuilder::with_id("desktop")
+        .icon(app.default_window_icon().expect("application icon").clone())
+        .tooltip("OpenCodex Desktop · 开发预览")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| action(app, event.id.as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
                 }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    *slot = None;
-                    Some(error.to_string())
-                }
-                Ok(None) => None,
+            ) {
+                show_window(tray.app_handle(), false);
             }
-        };
-        if let Some(result) = result {
-            state.input.lock().unwrap().take();
-            if state.exiting.load(Ordering::SeqCst) {
-                update_status(&state, "stopped", &format!("开发后端已退出（{result}）。"));
-                monitor_app.exit(state.exit_code.load(Ordering::SeqCst));
-            } else if state.status.lock().unwrap().phase != "error" {
-                show_error(
-                    &monitor_app,
-                    &state,
-                    &format!("后端已退出（{result}）。请查看日志，关闭应用后重新打开。"),
-                );
-            }
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
+        })
+        .build(app)?;
+    app.manage(TrayItems {
+        status,
+        start,
+        stop,
+        restart,
+        routing_status,
+        restore,
+        restore_back,
     });
     Ok(())
 }
 
 fn main() {
     tauri::Builder::default()
+        // Register before any plugin or setup code that could start a backend.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            let target = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(state) = target.try_state::<DesktopState>() {
+                    state.model.lock().unwrap().activation_count += 1;
+                    show_window(&target, false);
+                    refresh(&target);
+                }
+            });
+        }))
         .plugin(tauri_plugin_opener::init())
-        .manage(Arc::new(DesktopState::default()))
-        .invoke_handler(tauri::generate_handler![desktop_status, desktop_quit])
+        .invoke_handler(tauri::generate_handler![desktop_status, desktop_action])
         .setup(|app| {
+            let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()?;
+            let session = repo.join(".tmp/desktop").join(format!(
+                "session-{}-{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+            ));
+            fs::create_dir_all(&session)?;
+            app.manage(DesktopState {
+                repo,
+                session,
+                model: Mutex::new(Model {
+                    wants_window: true,
+                    ..Model::default()
+                }),
+            });
             WebviewWindowBuilder::new(app, "launcher", WebviewUrl::App("index.html".into()))
-                .title("OpenCodex Desktop · 开发预览")
-                .inner_size(640.0, 470.0)
-                .resizable(false)
+                .title("OpenCodex Desktop · 状态与控制")
+                .inner_size(740.0, 780.0)
+                .min_inner_size(640.0, 640.0)
                 .on_navigation(|url| {
                     url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost")
                 })
                 .build()?;
-            let state = app.state::<Arc<DesktopState>>().inner().clone();
-            if let Err(error) = start_backend(app.handle(), state.clone()) {
-                show_error(app.handle(), &state, &error.to_string());
-            }
-            if cfg!(debug_assertions) && std::env::args().any(|arg| arg == "--smoke-test") {
-                let smoke_app = app.handle().clone();
-                thread::spawn(move || {
-                    let deadline = Instant::now() + Duration::from_secs(75);
-                    loop {
-                        let phase = state.status.lock().unwrap().phase.clone();
-                        if phase == "loaded" {
-                            thread::sleep(Duration::from_secs(2));
-                            break;
-                        }
-                        if phase == "error" || Instant::now() >= deadline {
-                            state.exit_code.store(1, Ordering::SeqCst);
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                    request_exit(&smoke_app, &state);
-                });
-            }
+            install_tray(app.handle())?;
+            start_backend(app.handle());
+            #[cfg(debug_assertions)]
+            smoke::install(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                request_exit(
-                    window.app_handle(),
-                    window.state::<Arc<DesktopState>>().inner(),
-                );
+                hide_windows(window.app_handle());
             }
         })
         .build(tauri::generate_context!())
         .expect("Cannot initialize OpenCodex Desktop")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let state = app.state::<Arc<DesktopState>>();
-                if !state.exiting.load(Ordering::SeqCst) {
+                let state = app.state::<DesktopState>();
+                let can_exit = {
+                    let model = state.model.lock().unwrap();
+                    model.lifecycle.phase == Phase::Exiting && !model.lifecycle.active
+                };
+                if !can_exit {
                     api.prevent_exit();
-                    request_exit(app, &state);
+                    request_stop(app, Intent::Exit);
                 }
             }
         });
@@ -406,7 +657,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::backend_url;
-
     #[test]
     fn only_owned_loopback_origins_can_become_the_dashboard() {
         assert!(backend_url("http://127.0.0.1:43123/").is_some());

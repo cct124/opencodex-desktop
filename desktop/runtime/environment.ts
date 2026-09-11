@@ -1,8 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-/** M1 preview always uses a fresh profile; never inherit provider or client routing variables. */
+/** The preview owns its session profile; never inherit provider or client routing variables. */
 export function isolatedEnvironment(session: string, realHome: string, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  // Rust canonicalize() produces extended Windows paths. PowerShell 5.1 Add-Type
+  // cannot use that spelling for TEMP, so retain the same directory in Win32 form.
+  if (session.startsWith("\\\\?\\UNC\\")) session = "\\\\" + session.slice(8);
+  else if (session.startsWith("\\\\?\\") && /^[A-Za-z]:[\\/]/.test(session.slice(4))) session = session.slice(4);
   const env: NodeJS.ProcessEnv = {};
   const allowed = new Set(["path", "pathext", "systemroot", "windir", "comspec", "processor_architecture", "number_of_processors"]);
   for (const [key, value] of Object.entries(base)) {

@@ -7,9 +7,26 @@
     <h1>正在启动</h1>
     <p id="message" role="status">正在准备独立的开发实例…</p>
     <div class="progress" aria-hidden="true"></div>
-    <p class="hint">开发预览使用独立配置，首次启动不包含已有账户和模型设置。</p>
-    <details><summary>启动日志位置</summary><pre id="log"></pre></details>
-    <button id="quit">关闭应用</button>
+    <p class="hint">点击 X 关闭窗口后继续驻留系统托盘。停止代理会保留桌面应用；退出应用会同时停止代理。当前切换仅作用于独立开发会话中的 Codex 配置。</p>
+    <div class="actions">
+      <button data-action="open" id="open" hidden>打开主窗口</button>
+      <button data-action="start" id="start" hidden>启动代理</button>
+      <button data-action="restart" id="restart" disabled>重启代理</button>
+    </div>
+    <h2>停止与恢复</h2>
+    <p id="routing-state" role="status">Codex：正在读取路由状态…</p>
+    <div class="actions">
+      <button data-action="stop" id="stop" disabled>停止代理并恢复原生 Codex</button>
+      <button data-action="restore" id="restore" disabled>恢复原生 Codex（代理继续运行）</button>
+      <button data-action="restore-back" id="restore-back" disabled>将 Codex 重新接回当前代理</button>
+    </div>
+    <details><summary>后端日志位置</summary><pre id="log"></pre></details>
+    <div class="actions secondary">
+      <button data-action="logs">打开日志目录</button>
+      <button data-action="hide">隐藏到托盘</button>
+      <button data-action="quit" id="quit">退出应用并恢复原生 Codex</button>
+    </div>
+    <p id="action-error" role="alert"></p>
   </main>
   <script src="app.js"></script>
 </body>
