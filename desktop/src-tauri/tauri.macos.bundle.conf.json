@@ -1,7 +1,7 @@
 {
   "bundle": {
     "active": true,
-    "targets": ["dmg"],
+    "targets": ["app", "dmg"],
     "resources": { "../.bundle/runtime/": "runtime/" },
     "icon": ["../.bundle/icons/icon.icns", "../../gui/public/favicon.png"],
     "publisher": "OpenCodex Desktop contributors",

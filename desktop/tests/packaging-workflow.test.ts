@@ -6,6 +6,9 @@ import { packageVersions } from "../scripts/platform";
 const repo = resolve(import.meta.dir, "../..");
 test("macOS bundle keeps a PNG for Tauri's compiled default window/tray icon", () => {
   const config = JSON.parse(readFileSync(resolve(repo, "desktop/src-tauri/tauri.macos.bundle.conf.json"), "utf8"));
+  // Tauri deletes the intermediate .app after DMG creation unless explicitly requested.
+  // Retain it for the signature and actual bundled-runtime smoke checks.
+  expect(config.bundle.targets).toEqual(["app", "dmg"]);
   const png = config.bundle.icon.find((icon: string) => icon.endsWith(".png"));
   expect(png).toBeDefined();
   expect(existsSync(resolve(repo, "desktop/src-tauri", png))).toBe(true);
