@@ -1,9 +1,16 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { packageVersions } from "../scripts/platform";
 
 const repo = resolve(import.meta.dir, "../..");
+test("macOS bundle keeps a PNG for Tauri's compiled default window/tray icon", () => {
+  const config = JSON.parse(readFileSync(resolve(repo, "desktop/src-tauri/tauri.macos.bundle.conf.json"), "utf8"));
+  const png = config.bundle.icon.find((icon: string) => icon.endsWith(".png"));
+  expect(png).toBeDefined();
+  expect(existsSync(resolve(repo, "desktop/src-tauri", png))).toBe(true);
+});
+
 test("desktop build metadata stays separate from the proxy release line", () => {
   const versions = packageVersions(repo);
   const config = JSON.parse(readFileSync(resolve(repo, "desktop/src-tauri/tauri.conf.json"), "utf8"));
