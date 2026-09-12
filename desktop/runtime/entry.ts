@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { isolatedEnvironment, persistentEnvironment, prepareDirectories } from "./environment";
-import { ownedBackendReady } from "./readiness";
+import { ownedBackendReady, ownedBackendStatus } from "./readiness";
 import { preparePreviewConfig } from "./profile";
 import { RoutingGate, runRoutingCommand, type RoutingAction } from "./routing";
 import { assertNativeAvailable, assertPreviousBackendStopped, DesktopConnectionError, importedSettings, ownsNativeRoute, readConnection, writePrivateJson } from "./persistent";
@@ -207,22 +207,44 @@ process.on("exit", () => { if (stopTimer) clearTimeout(stopTimer); if (cleanupFa
 process.on("newListener", event => { if (event === "SIGINT" && stopping) queueMicrotask(deliverShutdown); });
 
 const deadline = Date.now() + 60000;
+function startupFailed(message: string): void {
+  if (stopping) return;
+  if (attached && connection.reconnect) {
+    // Keep the lease until the normal shutdown/recovery path has restored any
+    // owned route. Cancel only automatic reconnection so retry can open settings.
+    try {
+      connection.reconnect = false;
+      saveConnection();
+      message += " 已取消自动接入 Codex；可重新启动代理后检查设置，再手动接入。";
+    } catch {
+      message += " 自动连接选择未能保存，请检查数据目录是否可写。";
+    }
+  }
+  report({ type: "error", message });
+  stop();
+}
 async function awaitReady(): Promise<void> {
   while (!stopping && Date.now() < deadline) {
     try {
       const runtime = JSON.parse(readFileSync(join(env.OPENCODEX_HOME!, "runtime-port.json"), "utf8"));
-      if (runtime.pid === process.pid && runtime.port === port && await ownedBackendReady(port, process.pid, runtime.attestationSecret)) {
-        ready = true;
-        report({ type: "ready", url: `http://127.0.0.1:${port}/` });
-        await reportRouting();
-        return;
+      if (runtime.pid === process.pid && runtime.port === port) {
+        const status = await ownedBackendStatus(port, process.pid, runtime.attestationSecret);
+        if (status === "failed") {
+          startupFailed("后端启动检查失败（配置或模型同步未完成），请打开启动日志查看具体原因。");
+          return;
+        }
+        if (status === "ready") {
+          ready = true;
+          report({ type: "ready", url: `http://127.0.0.1:${port}/` });
+          await reportRouting();
+          return;
+        }
       }
     } catch { /* runtime record and listener are created during CLI startup */ }
     await Bun.sleep(200);
   }
   if (!stopping) {
-    report({ type: "error", message: "后端在 60 秒内未就绪，请查看启动日志。" });
-    stop();
+    startupFailed("后端在 60 秒内未就绪，请查看启动日志。");
   }
 }
 void awaitReady();
@@ -230,6 +252,5 @@ try {
   await import("../../src/cli/index");
 } catch (error) {
   console.error(error);
-  report({ type: "error", message: "后端启动失败，请查看启动日志。" });
-  stop();
+  startupFailed("后端启动失败，请查看启动日志。");
 }

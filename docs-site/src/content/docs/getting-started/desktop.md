@@ -33,10 +33,18 @@ Open the tray's desktop controls, configure providers, and explicitly enable the
 The controls show the target home: the launch environment's `CODEX_HOME`, or the user's `.codex`.
 Before the first connection, the backend uses an isolated client home.
 
+The app uses the same data directory when launched from another Windows desktop application.
+Desktop controls display its resolved location and report errors when opening the folder fails.
+
 The first connection restarts the backend once. Later restore/reconnect operations keep it running.
 Quitting restores native configuration and remembers the connection preference for the next launch.
 Restoring native Codex or stopping the proxy cancels automatic reconnection. Unknown or foreign
 routing is preserved and requires resolving the original installation first.
+
+If startup reports a configuration or model-sync failure, the desktop stops the backend and
+shows the failure immediately. Automatic Codex reconnection is cancelled after failed startup.
+Check the startup log, restart the proxy to review settings, then explicitly reconnect Codex.
+Recovery records remain available until normal cleanup completes; ambiguous client edits are preserved.
 
 ## Import settings
 

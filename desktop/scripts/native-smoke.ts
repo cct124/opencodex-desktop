@@ -15,7 +15,7 @@ const child = Bun.spawn([executable, mode], { cwd: repo, stdin: "ignore", stdout
 const timer = setTimeout(() => child.kill(), 360000);
 try {
   const code = await child.exited;
-  const name = readdirSync(sessions).find(name => !previousSessions.has(name) && name.startsWith(`session-${child.pid}-`));
+  const name = readdirSync(sessions).find(name => !previousSessions.has(name) && name.startsWith("session-"));
   if (!name) throw new Error("No new desktop session: close the existing development instance before running smoke checks.");
   const session = join(sessions, name);
   const report = JSON.parse(readFileSync(join(session, "smoke-result.json"), "utf8"));

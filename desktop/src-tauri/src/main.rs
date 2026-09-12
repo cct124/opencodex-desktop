@@ -7,6 +7,8 @@ mod profile;
 mod resources;
 #[cfg(debug_assertions)]
 mod smoke;
+#[cfg(windows)]
+mod windows_runtime;
 
 use lifecycle::{Completion, Intent, Lifecycle, Phase};
 use serde::Serialize;
@@ -344,12 +346,11 @@ fn backend_event(app: &tauri::AppHandle, generation: u64, event: backend::Event)
                 model.routing_busy = false;
                 model.codex_routing = if success { "native" } else { "unknown" }.into();
                 model.message = if outcome == Completion::Error {
-                    format!(
-                        "{} {message} 请检查日志后手动启动重试。",
-                        earlier_error.unwrap_or_default()
-                    )
-                    .trim()
-                    .into()
+                    match earlier_error {
+                        Some(error) if success => format!("{error} 后端已停止。"),
+                        Some(error) => format!("{error} {message}"),
+                        None => format!("{message} 请检查日志后手动启动重试。"),
+                    }
                 } else {
                     message
                 };
@@ -552,7 +553,12 @@ fn action(app: &tauri::AppHandle, name: &str) {
                 .root
                 .display()
                 .to_string();
-            let _ = app.opener().open_path(path, None::<&str>);
+            if let Err(error) = app.opener().open_path(path, None::<&str>) {
+                app.state::<DesktopState>().model.lock().unwrap().message =
+                    format!("无法打开数据目录：{error}");
+                refresh(app);
+                show_window(app, true);
+            }
         }
         "quit" => request_stop(app, Intent::Exit),
         "updates" => {
@@ -729,6 +735,15 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    match windows_runtime::enter_desktop_environment() {
+        Ok(Some(code)) => std::process::exit(code as i32),
+        Ok(None) => {}
+        Err(error) => {
+            windows_runtime::show_startup_error(&error);
+            std::process::exit(1);
+        }
+    }
     tauri::Builder::default()
         // Register before any plugin or setup code that could start a backend.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {

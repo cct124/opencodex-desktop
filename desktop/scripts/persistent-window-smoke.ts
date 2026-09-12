@@ -13,13 +13,14 @@ const paths = [join(homedir(), ".codex/config.toml"), join(homedir(), ".opencode
 const fingerprint = () => paths.map(path => existsSync(path) ? createHash("sha256").update(readFileSync(path)).digest("hex") : null);
 const before = fingerprint();
 for (const reopen of [false, true]) {
+  const previousSessions = new Set(existsSync(join(root, "runs")) ? readdirSync(join(root, "runs")) : []);
   const args = [join(repo, "desktop/src-tauri/target/debug/opencodex-desktop.exe"), "--smoke-persistent", root];
   if (reopen) args.push("--smoke-reopen");
   const child = Bun.spawn(args, { cwd: repo, stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true });
   const timer = setTimeout(() => child.kill(), 220000);
   try {
     const code = await child.exited;
-    const session = readdirSync(join(root, "runs")).find(name => name.startsWith(`session-${child.pid}-`));
+    const session = readdirSync(join(root, "runs")).find(name => !previousSessions.has(name));
     if (!session) throw new Error("No test window session; exit any existing desktop instance first.");
     const result = JSON.parse(readFileSync(join(root, "runs", session, "smoke-result.json"), "utf8"));
     if (code !== 0 || !result.ok) throw new Error(`Persistent window failed: ${JSON.stringify(result)}`);

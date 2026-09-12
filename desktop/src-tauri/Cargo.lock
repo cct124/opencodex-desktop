@@ -2311,12 +2311,14 @@ dependencies = [
 name = "opencodex-desktop"
 version = "2.50.0"
 dependencies = [
+ "dunce",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

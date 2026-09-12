@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { isolatedEnvironment } from "../runtime/environment";
-import { ownedBackendReady } from "../runtime/readiness";
+import { ownedBackendReady, ownedBackendStatus } from "../runtime/readiness";
 import { createLocalAttestationProof, createLocalAttestationSecret, LOCAL_ATTESTATION_CHALLENGE_HEADER, LOCAL_ATTESTATION_PROOF_HEADER } from "../../src/lib/local-management-attestation";
 import { join } from "node:path";
 
@@ -37,13 +37,14 @@ describe("isolated desktop preview", () => {
         const challenge = req.headers.get(LOCAL_ATTESTATION_CHALLENGE_HEADER)!;
         headers.set(LOCAL_ATTESTATION_PROOF_HEADER, createLocalAttestationProof(secret, challenge, pid, instance.port!)!);
       }
-      return Response.json({ service: "opencodex", pid, port: instance.port, status: path === "/healthz" ? "ok" : mode }, { headers });
+      return Response.json({ service: "opencodex", pid, port: instance.port, status: path === "/healthz" ? "ok" : mode }, { headers, status: path === "/readyz" && ["pending", "failed"].includes(mode) ? 503 : 200 });
     } });
     try {
       expect(await ownedBackendReady(server.port!, process.pid, secret)).toBe(true);
       for (const candidate of ["pending", "failed", "missing-proof", "foreign-pid"]) {
         mode = candidate;
         expect(await ownedBackendReady(server.port!, process.pid, secret)).toBe(false);
+        expect(await ownedBackendStatus(server.port!, process.pid, secret)).toBe(candidate === "pending" ? "pending" : candidate === "failed" ? "failed" : "unavailable");
       }
       mode = "ready";
       expect(await ownedBackendReady(server.port!, process.pid, createLocalAttestationSecret())).toBe(false);

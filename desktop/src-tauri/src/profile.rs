@@ -53,6 +53,9 @@ impl Profile {
         } else {
             app.path().app_local_data_dir()?
         };
+        fs::create_dir_all(&root)?;
+        // Store the OS-resolved path, also used by Explorer and the backend.
+        let root = dunce::canonicalize(root)?;
         let session = if preview {
             root.clone()
         } else {

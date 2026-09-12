@@ -44,11 +44,15 @@ Windows 数据默认保存在 `%LOCALAPPDATA%/me.opencodex.desktop/`：
 - `runs/`：每次应用启动的日志与状态。
 - `webview/`：管理窗口的浏览器数据。
 
+从其他 Windows 桌面软件启动时，应用也使用独立桌面运行环境，避免继承宿主的 AppData 重定向。控制页展示已解析的实际数据目录；打开目录失败会显示原因。
+
 首次连接前不访问真实 Codex 目录。目标遵循启动环境的 `CODEX_HOME`，未设置时为用户的 `.codex`。已存在其他代理路由或无法确认归属的恢复记录时，提示先从原工具恢复，不停止原工具的进程。
 
 “配置与数据”支持选择 JSON 文件，或导入原有 OpenCodex 的 `config.json`。导入需要在界面确认，会替换桌面设置、备份旧配置并重启；原文件保持不变。OAuth 登录、账户库、服务、PID 和恢复日志不在配置文件导入范围内，环境变量引用也不会变成内嵌密钥。
 
 退出应用会恢复原生配置，重新打开时按上次连接选择接回代理。“恢复原生”或“停止代理”会取消自动连接。异常退出后，只有与本应用记录匹配且原后端已退出的路由才进入上游恢复流程。
+
+后端明确报告配置或模型同步失败时，立即显示启动失败并停止后端，不继续等待 60 秒。失败的自动接入会被取消；修复日志中提示的问题后，可重新启动代理检查设置，再手动接入 Codex。恢复记录在正常清理完成前保留，无法确认的客户端改动不会被覆盖。
 
 ## 隔离开发预览
 
@@ -90,6 +94,8 @@ debug exe 依赖本源码目录中的 Bun、后端和 GUI 产物；release 安�
 桌面模式的请求排空时间沿用配置，最大 60 秒，额外留出清理时间。正常退出使用上游清理流程；超时强制结束或异常退出会明确报错，不声称配置恢复成功。现阶段系统开机启动、全局服务、上游托盘和自更新入口由桌面管理边界保护；恢复与连接通过桌面控制页和托盘执行。持久化模式的原生 Codex 上游请求采用 HTTPS/SSE，避免本次验证中观察到的 WebSocket 1011 关闭；普通 CLI 与显式开启 WebSocket 的第三方提供方保持原逻辑。
 
 ## 生命周期验证
+
+无窗口的 Windows 连接回归可从仓库根目录运行 `cargo run --locked --offline --manifest-path desktop/src-tauri/Cargo.toml --example runtime-probe -- persistent`。它复用正式应用的 Windows 进程启动逻辑，使用 `.tmp/desktop` 下的独立客户端夹具，并将结果写入 `.tmp/desktop/runtime-probe-persistent.log`。`package` 模式验证已暂存的安装包资源。登录 Windows 桌面后，可运行 `cargo test --locked --offline --manifest-path desktop/src-tauri/Cargo.toml windows_runtime::tests::child_runs_without_package_identity -- --ignored --exact` 验证子进程环境；它会主动执行两个子进程用例。这三个用例标记为 ignored，以免无桌面 Shell 的 CI 会话误执行交互环境检查。
 
 构建 debug 程序后，可在 `desktop/` 中执行：
 
