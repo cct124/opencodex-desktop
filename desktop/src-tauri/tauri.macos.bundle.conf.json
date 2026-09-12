@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["dmg"],
+    "resources": { "../.bundle/runtime/": "runtime/" },
+    "icon": ["../.bundle/icons/icon.icns"],
+    "publisher": "OpenCodex Desktop contributors",
+    "licenseFile": "../../LICENSE",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    }
+  }
+}

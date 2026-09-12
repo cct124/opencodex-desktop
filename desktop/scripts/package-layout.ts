@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { packagePlatform } from "./platform";
 
 export const runtimeEntries = ["src", "bin", "assets", "gui/dist", "desktop/runtime", "package.json", "bun.lock", "LICENSE", "README.md", "AGENTS_INSTALL.md"];
 
 export function safeBuildDirectory(repo: string, directory: string): string {
   const root = realpathSync(repo);
   const allowed = join(root, "desktop", ".bundle");
-  const target = resolve(directory);
+  // macOS /var (including tmpdir()) can be an alias of /private/var.
+  const target = resolve(root, relative(resolve(repo), resolve(directory)));
   if (target !== allowed && !target.startsWith(allowed + sep)) throw new Error("Build output must stay inside desktop/.bundle");
   for (let current = target; current !== root; current = dirname(current)) {
     if (existsSync(current) && (lstatSync(current).isSymbolicLink() || realpathSync(current).toLowerCase() !== current.toLowerCase())) {
@@ -26,6 +28,7 @@ export function copyTree(source: string, destination: string): void {
   } else if (stat.isFile()) {
     mkdirSync(dirname(destination), { recursive: true });
     copyFileSync(source, destination);
+    if (process.platform !== "win32") chmodSync(destination, stat.mode & 0o777);
   } else throw new Error("Package source is not a regular file or directory");
 }
 
@@ -40,16 +43,29 @@ export function filesIn(root: string, directory = root): string[] {
 
 export function fileDigest(path: string) { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
 
-export function writeManifest(root: string, version: string, bunVersion: string) {
+// The app starts Bun directly; npm's command shims are neither used nor shipped.
+// On macOS they are symlinks. All other links remain rejected by filesIn/copyTree.
+export function removeDependencyBins(directory: string): void {
+  for (const name of readdirSync(directory)) {
+    const path = join(directory, name);
+    const stat = lstatSync(path);
+    if (name === ".bin") {
+      if (stat.isSymbolicLink()) unlinkSync(path);
+      else rmSync(path, { recursive: true });
+    } else if (stat.isDirectory() && !stat.isSymbolicLink()) removeDependencyBins(path);
+  }
+}
+
+export function writeManifest(root: string, versions: { desktopVersion: string; runtimeVersion: string; bunVersion: string }, platform = packagePlatform().id) {
   const files = filesIn(root).filter(file => file !== "desktop-manifest.json");
-  const manifest = { format: 1, version, bunVersion, platform: "win32-x64", files: Object.fromEntries(files.map(file => [file, fileDigest(join(root, file))])) };
+  const manifest = { format: 2, ...versions, platform, files: Object.fromEntries(files.map(file => [file, fileDigest(join(root, file))])) };
   writeFileSync(join(root, "desktop-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
   return manifest;
 }
 
-export function verifyManifest(root: string): void {
+export function verifyManifest(root: string, platform = packagePlatform().id): void {
   const manifest = JSON.parse(readFileSync(join(root, "desktop-manifest.json"), "utf8"));
-  if (manifest.format !== 1 || manifest.platform !== "win32-x64" || typeof manifest.files !== "object" || !manifest.files) throw new Error("Invalid desktop manifest");
+  if (manifest.format !== 2 || manifest.platform !== platform || !manifest.desktopVersion || !manifest.runtimeVersion || !manifest.bunVersion || typeof manifest.files !== "object" || !manifest.files || Array.isArray(manifest.files)) throw new Error("Invalid desktop manifest");
   for (const [file, digest] of Object.entries(manifest.files)) {
     if (isAbsolute(file) || file.split(/[\\/]/).some(part => part === ".." || part === "." || !part)) throw new Error("Invalid package path");
     if (fileDigest(join(root, file)) !== digest) throw new Error(`Resource checksum mismatch: ${file}`);
@@ -58,9 +74,11 @@ export function verifyManifest(root: string): void {
   if (JSON.stringify(actual.sort()) !== JSON.stringify(Object.keys(manifest.files).sort())) throw new Error("Unexpected package files");
 }
 
-export function resetStage(repo: string): string {
-  const stage = safeBuildDirectory(repo, join(repo, "desktop/.bundle/runtime"));
+export function resetBuildDirectory(repo: string, name: "runtime" | "artifacts"): string {
+  const stage = safeBuildDirectory(repo, join(repo, "desktop/.bundle", name));
   if (existsSync(stage)) rmSync(stage, { recursive: true });
   mkdirSync(stage, { recursive: true });
   return stage;
 }
+
+export function resetStage(repo: string): string { return resetBuildDirectory(repo, "runtime"); }

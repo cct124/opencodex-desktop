@@ -1,4 +1,23 @@
 fn main() {
+    // Desktop and the bundled proxy have independent release lines. Embed the
+    // expected proxy version so replacing just one part is still detected.
+    for source in ["../package.json", "../../package.json"] {
+        println!("cargo:rerun-if-changed={source}");
+    }
+    let read_version = |path| {
+        let package: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        package["version"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(
+        read_version("../package.json"),
+        env!("CARGO_PKG_VERSION"),
+        "Keep desktop/package.json and desktop/src-tauri/Cargo.toml versions in sync"
+    );
+    println!(
+        "cargo:rustc-env=OPENCODEX_RUNTIME_VERSION={}",
+        read_version("../../package.json")
+    );
     // Reuse the upstream favicon verbatim; ICO supports a PNG payload on Windows.
     let source = "../../gui/public/favicon.png";
     println!("cargo:rerun-if-changed={source}");

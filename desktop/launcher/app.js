@@ -41,6 +41,7 @@ async function update() {
   try {
     const status = await invoke('desktop_status');
     currentStatus = status;
+    document.querySelector('#versions').textContent = `OpenCodex Desktop ${status.desktop_version} · OpenCodex 后端 ${status.runtime_version}`;
     document.querySelector('#mode-hint').textContent = status.persistent
       ? '设置会在退出重开后保留。点击 X 隐藏到托盘；停止代理保留桌面应用，退出应用同时停止代理。'
       : '开发预览：使用独立的临时会话，所有切换仅作用于测试配置。点击 X 后继续驻留托盘。';

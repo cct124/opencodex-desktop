@@ -28,6 +28,8 @@ use tauri_plugin_opener::OpenerExt;
 
 #[derive(Clone, Serialize)]
 struct Status {
+    desktop_version: &'static str,
+    runtime_version: &'static str,
     phase: Phase,
     message: String,
     log_path: String,
@@ -89,6 +91,8 @@ fn status(app: &tauri::AppHandle) -> Status {
     let state = app.state::<DesktopState>();
     let model = state.model.lock().unwrap();
     Status {
+        desktop_version: env!("CARGO_PKG_VERSION"),
+        runtime_version: env!("OPENCODEX_RUNTIME_VERSION"),
         phase: model.lifecycle.phase,
         message: model.message.clone(),
         log_path: model.log_path.display().to_string(),
@@ -563,7 +567,7 @@ fn action(app: &tauri::AppHandle, name: &str) {
         "quit" => request_stop(app, Intent::Exit),
         "updates" => {
             let _ = app.opener().open_url(
-                "https://github.com/cct124/opencodex-desktop/releases",
+                "https://github.com/cct124/opencodex-desktop/actions/workflows/desktop-build.yml",
                 None::<&str>,
             );
         }

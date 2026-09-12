@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "opencodex-desktop"
-version = "2.50.0"
+version = "0.1.0"
 dependencies = [
  "dunce",
  "serde",

@@ -21,7 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "package" => "package-smoke.ts",
         _ => return Err("expected persistent or package".into()),
     };
-    let mut command = std::process::Command::new(repo.join("node_modules/bun/bin/bun.exe"));
+    let bun = if cfg!(windows) { "bun.exe" } else { "bun" };
+    let mut command = std::process::Command::new(repo.join("node_modules/bun/bin").join(bun));
     command
         .arg(repo.join("desktop/scripts").join(script))
         .current_dir(&repo);

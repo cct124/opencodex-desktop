@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { launchPersistent, repo } from "./harness";
 import { copyTree, verifyManifest } from "./package-layout";
+import { packagePlatform, packageVersions } from "./platform";
 
 const staged = resolve(process.argv[2] ?? join(repo, "desktop/.bundle/runtime"));
 verifyManifest(staged);
@@ -17,8 +18,8 @@ mkdirSync(client, { recursive: true });
 const original = '# packaged smoke\nmodel = "gpt-5.4"\n';
 writeFileSync(join(client, "config.toml"), original);
 const windows = process.env.SystemRoot ?? "C:\\Windows";
-const env = { ...process.env, PATH: [windows, join(windows, "System32"), join(windows, "System32/WindowsPowerShell/v1.0")].join(";") };
-const launch = () => launchPersistent(data, client, join(testRoot, "absent-source.json"), runtime, join(runtime, "node_modules/bun/bin/bun.exe"), env);
+const env = { ...process.env, PATH: process.platform === "win32" ? [windows, join(windows, "System32"), join(windows, "System32/WindowsPowerShell/v1.0")].join(";") : "/usr/bin:/bin:/usr/sbin:/sbin" };
+const launch = () => launchPersistent(data, client, join(testRoot, "absent-source.json"), runtime, join(runtime, "node_modules/bun/bin", packagePlatform().bun), env);
 let requests = 0;
 const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
   if (new URL(request.url).pathname.endsWith("/models")) return Response.json({ object: "list", data: [{ id: "desktop-package-test", object: "model" }] });
@@ -35,6 +36,7 @@ try {
   if (!page.ok || !(await page.text()).includes("<html")) throw new Error("Packaged dashboard did not load");
   const health = await (await fetch(new URL("healthz", app.url))).json() as { version?: string; pid?: number };
   if (health.pid !== app.child.pid) throw new Error("Packaged process identity mismatch");
+  if (health.version !== packageVersions(repo).runtimeVersion) throw new Error("Packaged proxy version mismatch");
   if (readFileSync(join(client, "config.toml"), "utf8") !== original) throw new Error("Unconnected client was modified");
   const key = `ocx_${randomUUID().replaceAll("-", "")}`;
   const config = { providers: { fixture: { adapter: "openai-chat", baseUrl: `http://127.0.0.1:${provider.port}/v1`, allowPrivateNetwork: true, apiKey: "fixture-placeholder" } }, defaultProvider: "fixture",

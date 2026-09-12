@@ -1,12 +1,33 @@
 ---
-title: Windows desktop fork
-description: Windows installer, persistent configuration, and explicit Codex connection in the experimental desktop fork.
+title: Desktop fork
+description: Windows and macOS installers, independent desktop versions, and explicit Codex connection in the experimental desktop fork.
 ---
 
 This page describes the experimental
 [cct124/opencodex-desktop fork](https://github.com/cct124/opencodex-desktop).
-It is not part of the upstream npm installer. The Windows x64 installer workflow is under
-development and does not yet represent a published stable release.
+It is not part of the upstream npm installer. Windows x64 basic functionality has been manually
+tested. macOS Apple Silicon and Intel builds are also configured; their window and tray behavior
+still requires manual testing on a Mac. These are development packages, not stable releases.
+
+## Download automated builds
+
+Every branch push triggers [Desktop installers](https://github.com/cct124/opencodex-desktop/actions/workflows/desktop-build.yml).
+Open the run for your commit and download its **Artifacts** while signed in to GitHub.
+Choose `win32-x64` for Windows, `darwin-arm64` for Apple Silicon, or `darwin-x64` for Intel Mac.
+Each artifact contains the installer, SHA-256 checksum, and `build-info.json` recording the commit,
+architecture, desktop, proxy, and Bun versions. Artifacts expire after 14 days. Each platform must
+pass its build and isolated mock-provider smoke test before upload. Manual workflow runs are also
+supported. This workflow does not publish releases or use model credentials.
+
+Desktop versions start at **0.1.0** and are independent of OpenCodex's proxy version. The local
+desktop controls display both; the dashboard's existing version badge continues to show the proxy
+version. Maintainers update `desktop/package.json` and `desktop/src-tauri/Cargo.toml` together,
+then run `cargo check --offline --manifest-path desktop/src-tauri/Cargo.toml` to refresh the lockfile.
+Builds reject inconsistent desktop versions or resources from a different build.
+
+If you installed the earlier Windows test package numbered **2.50.0**, exit and uninstall it
+once, retaining app data, before installing **0.1.0**. Subsequent desktop upgrades use the new
+version line; the Windows downgrade protection remains enabled.
 
 ## Install and update
 
@@ -19,16 +40,27 @@ If WebView2 is missing, the embedded Microsoft bootstrapper needs an internet co
 Before installing an update or uninstalling, choose **Exit** from the desktop tray menu and
 wait for Codex restoration to finish. The installer refuses to continue while the desktop app
 is running. Updates replace the whole app; the dashboard's standalone updater is not used.
-Desktop controls link to the fork's releases page for manually published installers.
+Desktop controls link to the fork's installer workflow for downloads.
 Downgrades are disabled. App data lives separately from installation files and is preserved
 on upgrade and by default on uninstall; the interactive uninstaller offers an explicit option
 to delete app data. Exported downloads remain in the user's Downloads directory.
+
+On macOS 13 or later, open the `.dmg` for your architecture and drag the complete application
+into Applications. Quit the existing app before replacing it. Mac packages use an ad-hoc
+signature, without Apple Developer ID signing or notarization; macOS may block the first launch
+and require explicit approval in Privacy & Security. See [Tauri's signing guide](https://v2.tauri.app/distribute/sign/macos/).
+The package includes the native Bun executable and production dependencies. Build on the target
+architecture with Rust 1.92.0, Xcode Command Line Tools, and the repository's pinned Bun version.
+After frozen dependency installation and `cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml`,
+run `bun run desktop/scripts/build-installer.ts`. The installers and checksums are collected under
+`desktop/.bundle/artifacts/`.
 
 ## Start and connect
 
 Launch OpenCodex Desktop from the Start menu. For source development, use the built
 `desktop/src-tauri/target/debug/opencodex-desktop.exe`. Settings persist under
 `%LOCALAPPDATA%/me.opencodex.desktop/`. Closing the window keeps the proxy in the tray.
+On Mac, launch from Applications; data lives under `~/Library/Application Support/me.opencodex.desktop/`.
 Open the tray's desktop controls, configure providers, and explicitly enable the Codex connection.
 The controls show the target home: the launch environment's `CODEX_HOME`, or the user's `.codex`.
 Before the first connection, the backend uses an isolated client home.

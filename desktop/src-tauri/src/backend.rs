@@ -81,9 +81,10 @@ pub fn spawn(
             crate::resources::validate_root(
                 &repo,
                 env!("CARGO_PKG_VERSION"),
+                env!("OPENCODEX_RUNTIME_VERSION"),
                 !cfg!(debug_assertions),
             )?;
-            let bun = repo.join("node_modules/bun/bin/bun.exe");
+            let bun = repo.join(crate::resources::bun_relative());
             if !bun.is_file() {
                 return Err("缺少项目内 Bun，请先完成依赖安装。".into());
             }

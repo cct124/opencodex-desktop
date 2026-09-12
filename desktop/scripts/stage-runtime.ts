@@ -1,22 +1,24 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { copyTree, filesIn, resetStage, runtimeEntries, verifyManifest, writeManifest } from "./package-layout";
+import { copyTree, filesIn, removeDependencyBins, resetStage, runtimeEntries, verifyManifest, writeManifest } from "./package-layout";
+import { packagePlatform, packageVersions } from "./platform";
 
 const repo = resolve(import.meta.dir, "../..");
-const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
-if (process.platform !== "win32" || process.arch !== "x64") throw new Error("The first desktop package requires Windows x64");
-if (Bun.version !== pkg.dependencies.bun) throw new Error("Use the repository's pinned Bun version");
+const versions = packageVersions(repo);
+const platform = packagePlatform();
+if (Bun.version !== versions.bunVersion) throw new Error("Use the repository's pinned Bun version");
 if (!existsSync(join(repo, "gui/dist/index.html")) || !existsSync(join(repo, "src/generated/compatibility-version.json"))) throw new Error("Run build:gui before staging");
 const stage = resetStage(repo);
 for (const path of runtimeEntries) copyTree(join(repo, path), join(stage, path));
 // Install the exact production graph into a fresh tree. No dependency lifecycle scripts run.
-const install = Bun.spawnSync([process.execPath, "install", "--production", "--frozen-lockfile", "--ignore-scripts"], {
+const install = Bun.spawnSync([process.execPath, "install", "--production", "--frozen-lockfile", "--ignore-scripts", "--backend", "copyfile"], {
   cwd: stage, stdout: "inherit", stderr: "inherit", windowsHide: true,
 });
 if (install.exitCode !== 0) throw new Error("Production dependency installation failed");
-copyTree(process.execPath, join(stage, "node_modules/bun/bin/bun.exe"));
-const version = Bun.spawnSync([join(stage, "node_modules/bun/bin/bun.exe"), "--version"], { stdout: "pipe", stderr: "pipe", windowsHide: true });
-if (version.exitCode !== 0 || version.stdout.toString().trim() !== pkg.dependencies.bun) throw new Error("Staged Bun does not match package version");
+removeDependencyBins(join(stage, "node_modules"));
+copyTree(process.execPath, join(stage, "node_modules/bun/bin", platform.bun));
+const version = Bun.spawnSync([join(stage, "node_modules/bun/bin", platform.bun), "--version"], { stdout: "pipe", stderr: "pipe", windowsHide: true });
+if (version.exitCode !== 0 || version.stdout.toString().trim() !== versions.bunVersion) throw new Error("Staged Bun does not match package version");
 
 // Preserve npm license files in situ and collect the Rust license declarations and texts.
 const metadata = Bun.spawnSync(["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--manifest-path", join(repo, "desktop/src-tauri/Cargo.toml")], { stdout: "pipe", stderr: "pipe", windowsHide: true });
@@ -38,7 +40,7 @@ for (const dependency of JSON.parse(metadata.stdout.toString()).packages as { na
 }
 mkdirSync(join(stage, "licenses"), { recursive: true });
 writeFileSync(join(stage, "licenses/THIRD-PARTY-NOTICES.txt"), notices.join("\n") + "\n");
-const manifest = writeManifest(stage, pkg.version, Bun.version);
+const manifest = writeManifest(stage, versions);
 verifyManifest(stage);
 
 const png = readFileSync(join(repo, "gui/public/favicon.png"));
@@ -50,4 +52,4 @@ icon[6] = width % 256; icon[7] = height % 256;
 icon.writeUInt16LE(1, 10); icon.writeUInt16LE(32, 12);
 icon.writeUInt32LE(png.length, 14); icon.writeUInt32LE(22, 18);
 writeFileSync(join(repo, "desktop/.bundle/icon.ico"), Buffer.concat([icon, png]));
-console.log(JSON.stringify({ staged: true, version: pkg.version, bun: Bun.version, files: Object.keys(manifest.files).length }));
+console.log(JSON.stringify({ staged: true, ...versions, platform: platform.id, files: Object.keys(manifest.files).length }));

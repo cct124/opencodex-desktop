@@ -2,11 +2,11 @@
 
 在 OpenCodex 的同一个 fork 仓库内增加 Tauri 桌面能力，保留现有代理后端和管理界面。
 
-目标平台先覆盖 Windows x64。安装后的应用提供独立窗口、系统托盘和完整的 OpenCodex 功能，并携带所需运行时，不依赖机器上全局安装的 OpenCodex、Node.js 或 Bun。开发环境可以使用这些工具。
+目标平台覆盖 Windows x64 和 macOS（Apple Silicon、Intel）。安装后的应用提供独立窗口、系统托盘和完整的 OpenCodex 功能，并携带所需运行时，不依赖机器上全局安装的 OpenCodex、Node.js 或 Bun。开发环境可以使用这些工具。
 
 ## 当前阶段
 
-已实现 M0 源码基线、M1 独立窗口、M2 托盘生命周期、M3 持久化配置和 Codex 接入，以及 Windows x64 安装包构建。窗口加载原有完整管理界面，系统操作转到桌面控制页。安装包仍为待验收的开发产物，尚未发布稳定版本。
+已实现 M0 源码基线、M1 独立窗口、M2 托盘生命周期、M3 持久化配置和 Codex 接入。Windows 基础功能已通过手动验收；新增 macOS 安装包流水线，Mac 窗口与托盘仍需在实机验收。窗口加载原有完整管理界面，系统操作转到桌面控制页。安装包为开发产物，尚未发布稳定版本。
 
 - 上游：<https://github.com/lidge-jun/opencodex>
 - 起点：`v2.50.0`
@@ -14,7 +14,23 @@
 - 桌面集成分支：`desktop/main`
 - 公开 fork：<https://github.com/cct124/opencodex-desktop>。
 
-## Windows 安装包
+## 自动构建与版本
+
+每次向任意分支推送提交后，GitHub Actions 的 [Desktop installers](https://github.com/cct124/opencodex-desktop/actions/workflows/desktop-build.yml) 工作流自动构建，也支持手动运行。打开对应提交的成功运行，在 **Artifacts** 下载：
+
+| 产物 | 系统 | 安装文件 |
+| --- | --- | --- |
+| `opencodex-desktop-win32-x64-<commit>` | Windows x64 | `.exe` |
+| `opencodex-desktop-darwin-arm64-<commit>` | Mac Apple Silicon | `_aarch64.dmg` |
+| `opencodex-desktop-darwin-x64-<commit>` | Mac Intel | `_x64.dmg` |
+
+每个下载包含完整安装包、SHA-256 校验文件和记录提交、架构、桌面版/后端/Bun 版本的 `build-info.json`，保留 14 天。只有该平台的构建和隔离模拟请求测试成功后才上传；下载 Actions 产物需要登录 GitHub。本流程不发布 GitHub Release，不使用账号登录或模型密钥。
+
+桌面版从 **0.1.0** 起独立维护：同步修改 `desktop/package.json` 和 `desktop/src-tauri/Cargo.toml`，然后执行 `cargo check --offline --manifest-path desktop/src-tauri/Cargo.toml` 更新 `Cargo.lock`。Tauri 读取桌面 package 的版本，构建和测试会拒绝不一致。后端的根 `package.json` 保留上游版本；控制页同时显示两个版本，原管理界面的版本徽标仍表示 OpenCodex 后端。
+
+以前标为 `2.50.0` 的 Windows 测试包需先退出并卸载，再安装 `0.1.0`；卸载时保留应用数据。此为一次性的版本线切换，之后桌面版正常递增升级，仍禁止直接降级。
+
+## 本地安装包构建
 
 从仓库根目录在 PowerShell 中构建（需先安装根目录和 GUI 的锁定依赖，以及 Rust / Windows C++ 构建工具）：
 
@@ -27,9 +43,18 @@ cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 
 输出为 `desktop/src-tauri/target/release/bundle/nsis/OpenCodex Desktop_<version>_x64-setup.exe` 和同名 `.sha256`。固定 Tauri CLI、Rust 锁文件和 Bun 版本；生成脚本从允许列表复制资源、安装生产依赖并收集许可文件，不携带工作区配置、日志或开发笔记。`desktop-manifest.json` 用于构建与验收时检查资源哈希；程序启动时检查必需文件和版本，不将该清单宣称为数字签名。
 
+Mac 上安装 Xcode Command Line Tools、Rust 1.92.0 和根 package 指定的 Bun，执行相同的 Bun/Rust 命令（将 Windows 的 Bun 路径替换为 `bun`）。必须在目标原生架构上构建，输出 `desktop/src-tauri/target/release/bundle/dmg/OpenCodex Desktop_<version>_<aarch64|x64>.dmg`；最低 macOS 13。打开 DMG，将完整应用拖入 Applications。构建采用 ad-hoc 签名，未作 Apple 开发者签名或公证，因此 macOS 可能阻止首次打开，需要在系统隐私与安全设置中明确允许。完整包验收还应运行：
+
+```sh
+codesign --verify --deep --strict "desktop/src-tauri/target/release/bundle/macos/OpenCodex Desktop.app"
+bun run desktop/scripts/package-smoke.ts "desktop/src-tauri/target/release/bundle/macos/OpenCodex Desktop.app/Contents/Resources/runtime"
+```
+
+统一收集到 `desktop/.bundle/artifacts/` 的产物只属于本次构建。Mac 包含原架构的 Bun 和原生依赖，保留可执行权限，不携带 npm 命令符号链接。
+
 安装后从开始菜单启动，无需源码目录或全局 Node.js、Bun、OpenCodex。当前为未签名开发安装包。安装仅针对当前用户；没有 WebView2 的电脑需要联网运行内置 Microsoft 引导程序。
 
-升级、重装和卸载前需从托盘退出，等待配置恢复完成。安装程序不会强行终止运行中的桌面进程，不允许降级。升级和默认卸载保留应用数据；交互式卸载可明确勾选删除数据。桌面控制页提供 Releases 链接，使用完整安装包手动更新。开机启动和全局服务尚未接入。
+升级、重装和卸载前需从托盘退出，等待配置恢复完成。Windows 安装程序不会强行终止运行中的桌面进程，不允许降级。升级和默认卸载保留应用数据；Windows 交互式卸载可明确勾选删除数据。桌面控制页提供 Actions 下载链接，使用完整安装包手动更新。开机启动和全局服务尚未接入。
 
 管理页面的系统操作打开桌面控制页；如需重启 Codex，请先完成当前轮次，再手动重启。导出保存到 `Downloads/OpenCodex Desktop/`，控制页可打开下载目录。文件名带唯一前缀以避免覆盖。
 
@@ -38,6 +63,8 @@ cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 构建后双击 `desktop/src-tauri/target/debug/opencodex-desktop.exe` 启动持久化模式。首次启动先配置提供方；从托盘打开“桌面状态与控制”，确认显示的 Codex 目录，点击“启用 Codex 代理并记住选择”。首次连接会重启一次后端，之后恢复与接回无需重启代理。
 
 Windows 数据默认保存在 `%LOCALAPPDATA%/me.opencodex.desktop/`：
+
+macOS 对应目录为 `~/Library/Application Support/me.opencodex.desktop/`，内部布局相同。
 
 - `.opencodex/`：提供方、模型和代理设置；导入前的备份在 `backups/`。
 - `connection.json`：连接选择、目标 Codex 目录和用于异常恢复的运行记录。
@@ -120,6 +147,6 @@ debug exe 依赖本源码目录中的 Bun、后端和 GUI 产物；release 安�
 | `desktop/` | 放置 Tauri 窗口、托盘、进程管理及桌面打包代码 |
 | `devlog/_plan/260911_tauri_desktop/` | 实施计划、验证记录 |
 
-以一个产品、一套版本和一个安装包交付。允许必要的上游代码修改，保持改动集中、可解释；暂不拆分独立仓库、通用后端 SDK 或新的业务通信协议。
+以一个桌面产品、独立桌面版本和各平台完整安装包交付，保留所携带后端的上游版本。允许必要的上游代码修改，保持改动集中、可解释；暂不拆分独立仓库、通用后端 SDK 或新的业务通信协议。
 
 实施步骤和验收范围见 [桌面增强计划](../devlog/_plan/260911_tauri_desktop/010_plan.md)，基线窗口验证见 [M1 验证记录](../devlog/_plan/260911_tauri_desktop/030_m1.md)，托盘和生命周期验证见 [M2 验证记录](../devlog/_plan/260911_tauri_desktop/040_m2.md)，安装包、回归对照和待验收项见 [M3 分发记录](../devlog/_plan/260911_tauri_desktop/060_m3_distribution.md)。

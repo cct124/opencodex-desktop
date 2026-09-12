@@ -1,0 +1,86 @@
+name: Desktop installers
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: desktop-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            runner: windows-2022
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: darwin-x64
+            runner: macos-15-intel
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      DESKTOP_BUILD_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Install locked dependencies
+        run: |
+          bun install --frozen-lockfile
+          bun install --cwd gui --frozen-lockfile
+          bun install --cwd desktop --frozen-lockfile
+
+      - name: Setup pinned Rust
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup override set 1.92.0
+          cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+
+      - name: Check types and desktop regressions
+        run: |
+          bun run typecheck
+          bun x tsc --project desktop/tsconfig.json --noEmit
+          bun test --cwd desktop ./tests
+          cargo test --locked --offline --manifest-path desktop/src-tauri/Cargo.toml
+
+      - name: Build native installer
+        run: bun run desktop/scripts/build-installer.ts
+
+      - name: Smoke test the packaged runtime (Windows)
+        if: runner.os == 'Windows'
+        run: cargo run --locked --offline --manifest-path desktop/src-tauri/Cargo.toml --example runtime-probe -- package
+
+      - name: Verify app signature and bundled runtime (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict "desktop/src-tauri/target/release/bundle/macos/OpenCodex Desktop.app"
+          bun run desktop/scripts/package-smoke.ts "desktop/src-tauri/target/release/bundle/macos/OpenCodex Desktop.app/Contents/Resources/runtime"
+
+      - name: Upload installers and checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencodex-desktop-${{ matrix.platform }}-${{ github.sha }}
+          path: desktop/.bundle/artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
