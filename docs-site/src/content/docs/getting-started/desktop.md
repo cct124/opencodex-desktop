@@ -73,6 +73,13 @@ Quitting restores native configuration and remembers the connection preference f
 Restoring native Codex or stopping the proxy cancels automatic reconnection. Unknown or foreign
 routing is preserved and requires resolving the original installation first.
 
+Starting with desktop **0.1.1**, a retained recovery journal no longer blocks reconnection after
+reinstalling when the previous process has exited (or is this authorized backend), routing is
+native, and the companion profile matches its original snapshot. Settings added while Codex was
+connected are preserved; the next connection snapshots the current configuration. Do not delete
+your `.codex` directory or sign out to resolve this case. Unreadable, unverified, live foreign, or
+incompletely restored records remain protected and block connection.
+
 If startup reports a configuration or model-sync failure, the desktop stops the backend and
 shows the failure immediately. Automatic Codex reconnection is cancelled after failed startup.
 Check the startup log, restart the proxy to review settings, then explicitly reconnect Codex.

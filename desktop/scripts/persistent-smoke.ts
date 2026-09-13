@@ -74,6 +74,38 @@ try {
   check(readFileSync(join(client, "config.toml"), "utf8") === native, "Explicit stop did not cancel automatic connection");
   await app.stop();
   steps.push("crash_recovery_restores_original_baseline_and_explicit_stop_cancels_reconnect");
+
+  // Codex rewrites settings while connected. Restore must preserve those edits;
+  // its retained journal must not strand either a reconnect or a clean reinstall.
+  app = await launchPersistent(root, client, source);
+  check((await app.command("restore-back")).success, "Could not connect before client rewrite");
+  writeFileSync(join(client, "config.toml"), 'service_tier = "fast"\n' + readFileSync(join(client, "config.toml"), "utf8"));
+  check((await app.command("restore")).success, "Restore after client rewrite failed");
+  check(readFileSync(join(client, "config.toml"), "utf8").includes('service_tier = "fast"'), "Restore discarded client edits");
+  check(existsSync(join(client, "opencodex-journal.json")), "Fixture did not reproduce a retained recovery journal");
+  check((await app.command("restore-back")).success, "Retained journal blocked same-process reconnect");
+  // Make another edit so quit exercises the owned-field fallback again.
+  writeFileSync(join(client, "config.toml"), 'model_verbosity = "low"\n' + readFileSync(join(client, "config.toml"), "utf8"));
+  await app.stop(true);
+  const restoredAfterEdits = readFileSync(join(client, "config.toml"), "utf8");
+  check(restoredAfterEdits.includes('service_tier = "fast"') && restoredAfterEdits.includes('model_verbosity = "low"'), "Quit discarded client edits");
+  check(!(Bun.TOML.parse(restoredAfterEdits) as Record<string, unknown>).openai_base_url, "Quit left the proxy route active");
+  check(existsSync(join(client, "opencodex-journal.json")), "Quit fixture did not retain its recovery journal");
+  const reinstalled = join(root, "fresh-install-data");
+  mkdirSync(reinstalled);
+  app = await launchPersistent(reinstalled, client, source);
+  check(readFileSync(join(client, "config.toml"), "utf8") === restoredAfterEdits, "Fresh installation changed native settings before consent");
+  await app.command("import-existing", "reconfigure");
+  await app.stop();
+  app = await launchPersistent(reinstalled, client, source);
+  await app.command("restore-back", "reconfigure");
+  await app.stop();
+  app = await launchPersistent(reinstalled, client, source);
+  check(readFileSync(join(client, "config.toml"), "utf8").includes(app.url.replace(/\/$/, "")), "Fresh installation did not reconnect");
+  await app.stop(true);
+  check(readFileSync(join(client, "config.toml"), "utf8") === restoredAfterEdits, "Reinstallation restored an outdated snapshot over client edits");
+  steps.push("client_edits_survive_restore_quit_and_reinstall_with_a_retained_journal");
+
   app = await launchPersistent(root, client, source);
   check((await app.command("restore-back")).success, "Could not prepare ambiguous cleanup case");
   const malformed = 'openai_base_url = "unterminated';

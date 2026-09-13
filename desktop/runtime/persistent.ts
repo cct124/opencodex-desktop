@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { hasRestoredProcessJournal } from "./restored-journal";
 
 /** Only these fixed messages may be shown by native controls without log details. */
 export class DesktopConnectionError extends Error {}
@@ -48,13 +49,16 @@ export function ownsNativeRoute(state: ConnectionState): boolean {
   return config.openai_base_url === endpoint || config.openai_base_url === `${endpoint}/v1`;
 }
 
-/** Refuse an existing provider/proxy rather than silently adopting its route or journal. */
+/** Refuse active/ambiguous ownership; an already-restored process journal is not a route. */
 export function assertNativeAvailable(state: ConnectionState): void {
   if (ownsNativeRoute(state)) return;
   const config = nativeConfig(state.codexHome);
-  if (config.openai_base_url || (config.model_provider && config.model_provider !== "openai")
-      || existsSync(join(state.codexHome, "opencodex-journal.json"))) {
+  if (config.openai_base_url || (config.model_provider && config.model_provider !== "openai")) {
     throw new DesktopConnectionError("Codex 当前由其他配置或代理接管。请先在原工具中恢复原生 Codex，再连接桌面版。");
+  }
+  if (existsSync(join(state.codexHome, "opencodex-journal.json"))
+      && !hasRestoredProcessJournal(state.codexHome, state.authorized)) {
+    throw new DesktopConnectionError("Codex 恢复记录尚未完成或无法确认归属，未修改原文件。请在原工具中完成恢复后重试，或检查 Codex 恢复记录。");
   }
 }
 
