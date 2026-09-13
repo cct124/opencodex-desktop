@@ -22,7 +22,7 @@ test("desktop build metadata stays separate from the proxy release line", () => 
   expect(lock.package.find(pkg => pkg.name === "opencodex-desktop")?.version).toBe(versions.desktopVersion);
 });
 
-test("installer automation builds three native platforms with read-only, pinned actions", () => {
+test("installer automation builds three native platforms and only version tags grant release writes", () => {
   const workflow = Bun.YAML.parse(readFileSync(resolve(repo, ".github/workflows/desktop-build.yml"), "utf8")) as any;
   expect(workflow.permissions).toEqual({ contents: "read" });
   expect(Object.keys(workflow.on).sort()).toEqual(["push", "workflow_dispatch"]);
@@ -32,8 +32,25 @@ test("installer automation builds three native platforms with read-only, pinned 
     { platform: "darwin-arm64", runner: "macos-15" },
     { platform: "darwin-x64", runner: "macos-15-intel" },
   ]);
-  for (const step of workflow.jobs.build.steps) {
-    if (step.uses && !step.uses.startsWith("./")) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
+  expect(workflow.on.push.tags).toEqual(["desktop-v*"]);
+  expect(workflow.jobs.build.permissions).toBeUndefined();
+  expect(workflow.jobs["verify-release"].permissions).toBeUndefined();
+  for (const job of Object.values(workflow.jobs) as any[]) {
+    for (const step of job.steps) {
+      if (step.uses && !step.uses.startsWith("./")) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
+      if (step.uses?.startsWith("actions/checkout@")) expect(step.with["persist-credentials"]).toBe(false);
+    }
+  }
+  expect(workflow.jobs.release.needs).toEqual(["build", "verify-release"]);
+  expect(workflow.jobs.release.permissions).toEqual({ contents: "write" });
+  expect(workflow.jobs.release.if).toBe("github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/desktop-v')");
+  expect(workflow.jobs["verify-release"].needs).toBe("build");
+  for (const job of [workflow.jobs["verify-release"], workflow.jobs.release]) {
+    const download = job.steps.find((step: any) => step.uses?.startsWith("actions/download-artifact@"));
+    expect(download.with["merge-multiple"]).toBe(false);
+    expect(download.with.pattern).toBe("opencodex-desktop-*-${{ github.sha }}");
+    expect(download.with["run-id"]).toBeUndefined();
+    expect(job.steps.some((step: any) => step.run?.includes("install"))).toBe(false);
   }
   const upload = workflow.jobs.build.steps.find((step: any) => step.uses?.startsWith("actions/upload-artifact@"));
   expect(upload.with.path).toBe("desktop/.bundle/artifacts/");

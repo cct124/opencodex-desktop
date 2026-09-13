@@ -17,7 +17,7 @@ Choose `win32-x64` for Windows, `darwin-arm64` for Apple Silicon, or `darwin-x64
 Each artifact contains the installer, SHA-256 checksum, and `build-info.json` recording the commit,
 architecture, desktop, proxy, and Bun versions. Artifacts expire after 14 days. Each platform must
 pass its build and isolated mock-provider smoke test before upload. Manual workflow runs are also
-supported. This workflow does not publish releases or use model credentials.
+supported. Tests use a mock provider and no model credentials.
 
 Desktop versions start at **0.1.0** and are independent of OpenCodex's proxy version. The local
 desktop controls display both; the dashboard's existing version badge continues to show the proxy
@@ -28,6 +28,30 @@ Builds reject inconsistent desktop versions or resources from a different build.
 If you installed the earlier Windows test package numbered **2.50.0**, exit and uninstall it
 once, retaining app data, before installing **0.1.0**. Subsequent desktop upgrades use the new
 version line; the Windows downgrade protection remains enabled.
+
+## Publish desktop releases
+
+Pushing a `desktop-v<version>` tag triggers the same three-platform build and then automatically
+publishes a [GitHub prerelease](https://github.com/cct124/opencodex-desktop/releases). Ordinary branch
+pushes only produce test artifacts. Before tagging, update the desktop package, Cargo version and
+lockfile together, add `desktop/releases/<version>.md`, and commit and push those changes.
+For the current 0.1.1 version, tag the intended commit containing the publishing workflow:
+
+```sh
+git tag -a desktop-v0.1.1 -m "OpenCodex Desktop 0.1.1"
+git push origin desktop-v0.1.1
+```
+
+The tag must exactly match the desktop version. All three builds and packaged smoke tests must
+succeed; publication also verifies every installer's commit, versions and SHA-256 checksum.
+Release assets include three installers, their checksum files and three platform-specific build
+metadata files. Portable `OpenCodex-Desktop_...` asset names are also used in their checksums and metadata.
+
+Uploads are completed and verified in a draft before it becomes public. Retry failed jobs on the
+tag run to resume an interrupted draft. Complete published releases and manually created releases
+are preserved; use a new version for new binaries and never move published tags. Tag releases are
+currently always prereleases. Only the tag-gated publish job has `contents: write`; no additional
+personal access token is needed. The upstream npm release process is separate.
 
 ## Install and update
 

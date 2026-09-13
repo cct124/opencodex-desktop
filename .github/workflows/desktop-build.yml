@@ -3,6 +3,7 @@ name: Desktop installers
 on:
   push:
     branches: ['**']
+    tags: ['desktop-v*']
   workflow_dispatch:
 
 permissions:
@@ -44,6 +45,9 @@ jobs:
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
 
+      - name: Validate desktop version and release tag
+        run: node .github/scripts/desktop-release.cjs validate-ref
+
       - name: Install locked dependencies
         run: |
           bun install --frozen-lockfile
@@ -84,3 +88,55 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  verify-release:
+    name: Verify release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download this run's installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: opencodex-desktop-*-${{ github.sha }}
+          path: release-artifacts
+          merge-multiple: false
+
+      - name: Verify all platforms, versions, commit and checksums
+        run: node .github/scripts/desktop-release.cjs verify-artifacts release-artifacts
+
+  release:
+    name: Publish desktop prerelease
+    needs: [build, verify-release]
+    if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download this run's installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: opencodex-desktop-*-${{ github.sha }}
+          path: release-artifacts
+          merge-multiple: false
+
+      # Only this tag-gated job has write permission. It installs no dependencies
+      # and never executes downloaded installers. Complete drafts before publishing.
+      - name: Publish verified assets
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const { publishRelease } = require('./.github/scripts/desktop-release.cjs');
+            const url = await publishRelease({ github, context, directory: 'release-artifacts', repoRoot: process.cwd() });
+            core.notice(`Desktop release: ${url}`);

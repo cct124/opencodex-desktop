@@ -24,11 +24,26 @@
 | `opencodex-desktop-darwin-arm64-<commit>` | Mac Apple Silicon | `_aarch64.dmg` |
 | `opencodex-desktop-darwin-x64-<commit>` | Mac Intel | `_x64.dmg` |
 
-每个下载包含完整安装包、SHA-256 校验文件和记录提交、架构、桌面版/后端/Bun 版本的 `build-info.json`，保留 14 天。只有该平台的构建和隔离模拟请求测试成功后才上传；下载 Actions 产物需要登录 GitHub。本流程不发布 GitHub Release，不使用账号登录或模型密钥。
+每个下载包含完整安装包、SHA-256 校验文件和记录提交、架构、桌面版/后端/Bun 版本的 `build-info.json`，保留 14 天。只有该平台的构建和隔离模拟请求测试成功后才上传；下载 Actions 产物需要登录 GitHub。测试使用模拟提供方，不使用账号登录或模型密钥。
 
 桌面版从 **0.1.0** 起独立维护：同步修改 `desktop/package.json` 和 `desktop/src-tauri/Cargo.toml`，然后执行 `cargo check --offline --manifest-path desktop/src-tauri/Cargo.toml` 更新 `Cargo.lock`。Tauri 读取桌面 package 的版本，构建和测试会拒绝不一致。后端的根 `package.json` 保留上游版本；控制页同时显示两个版本，原管理界面的版本徽标仍表示 OpenCodex 后端。
 
 以前标为 `2.50.0` 的 Windows 测试包需先退出并卸载，再安装 `0.1.0`；卸载时保留应用数据。此为一次性的版本线切换，之后桌面版正常递增升级，仍禁止直接降级。
+
+### 自动发布到 Releases
+
+普通分支提交生成测试包；推送与桌面版本匹配的 `desktop-v<版本>` 标签后，工作流自动构建并发布 [GitHub 预发布版本](https://github.com/cct124/opencodex-desktop/releases)。三个平台必须全部通过验收；发布任务还会核对提交、版本、文件列表与 SHA-256，再上传三个安装包、对应校验文件和按平台命名的构建信息。Release 附件使用 `OpenCodex-Desktop_...` 文件名，校验文件和构建信息同步使用该名称。
+
+维护者先更新桌面 package、Cargo 和锁文件，并新增 `desktop/releases/<版本>.md` 发布说明，提交并推送代码。确认待发布提交后，以当前 `0.1.1` 为例：
+
+```bash
+git tag -a desktop-v0.1.1 -m "OpenCodex Desktop 0.1.1"
+git push origin desktop-v0.1.1
+```
+
+只对尚未发布的新版本创建标签，不移动已有发布标签。标签提交必须包含本自动发布工作流。失败后可在该标签的 Actions 运行中重试失败任务；工作流会继续上传自己的未发布草稿，全部校验通过后才公开。已公开的完整版本和手动创建的发布不会被覆盖。
+
+当前标签发布统一标记为 Pre-release。无需额外配置 PAT；只有标签发布任务具有仓库内容写权限，其余构建和校验任务保持只读。此桌面流程与上游 npm 发布相互独立。
 
 ## 本地安装包构建
 
