@@ -1,10 +1,10 @@
 import { mkdirSync, readFileSync, realpathSync } from "node:fs";
-import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { isolatedEnvironment, persistentEnvironment, prepareDirectories } from "./environment";
 import { ownedBackendReady, ownedBackendStatus } from "./readiness";
 import { preparePreviewConfig } from "./profile";
+import { selectDesktopPort } from "./port";
 import { RoutingGate, runRoutingCommand, type RoutingAction } from "./routing";
 import { assertNativeAvailable, assertPreviousBackendStopped, DesktopConnectionError, importedSettings, ownsNativeRoute, readConnection, writePrivateJson } from "./persistent";
 
@@ -40,6 +40,20 @@ Object.assign(process.env, env);
 process.env.OCX_BUN_RUNTIME_SOURCE = "bundled";
 process.env.OCX_BUN_RUNTIME_PATH = process.execPath;
 
+// Check before recovery rewrites any client files. A busy saved port must not
+// silently move existing Codex tasks to a different endpoint.
+let port: number;
+try {
+  port = await selectDesktopPort(persistent ? connection : undefined);
+  if (persistent && connection.listenPort !== port) {
+    connection.listenPort = port;
+    saveConnection();
+  }
+} catch (error) {
+  report({ type: "error", message: error instanceof DesktopConnectionError ? error.message : "无法预留桌面代理端口，请查看启动日志。" });
+  throw error;
+}
+
 const configPath = join(env.OPENCODEX_HOME!, "config.json");
 // Recovery runs with injection disabled, before the source CLI can recover any journal itself.
 const { shutdownTimeoutMs } = preparePreviewConfig(configPath, persistent ? false : resumeCodex, persistent);
@@ -52,15 +66,6 @@ if (attached && connection.lease) {
   saveConnection();
 }
 
-const port = await new Promise<number>((accept, reject) => {
-  const reservation = createServer();
-  reservation.once("error", reject);
-  reservation.listen(0, "127.0.0.1", () => {
-    const address = reservation.address();
-    if (!address || typeof address === "string") return reject(new Error("Cannot allocate a loopback port"));
-    reservation.close(error => error ? reject(error) : accept(address.port));
-  });
-});
 if (attached && connection.reconnect) {
   assertNativeAvailable(connection);
   connection.lease = { pid: process.pid, port };

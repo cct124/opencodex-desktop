@@ -10,6 +10,7 @@ export interface ConnectionState {
   authorized: boolean;
   reconnect: boolean;
   codexHome: string;
+  listenPort?: number;
   lease?: { pid: number; port: number };
 }
 
@@ -26,6 +27,7 @@ export function readConnection(root: string, codexHome: string): ConnectionState
   if (state.version !== 1 || typeof state.authorized !== "boolean" || typeof state.reconnect !== "boolean"
       || resolve(state.codexHome).toLowerCase() !== resolve(codexHome).toLowerCase()
       || (state.reconnect && !state.authorized)
+      || (state.listenPort !== undefined && (!Number.isInteger(state.listenPort) || state.listenPort < 1 || state.listenPort > 65535))
       || (state.lease && (!state.authorized || !Number.isInteger(state.lease.pid) || state.lease.pid <= 0
         || !Number.isInteger(state.lease.port) || state.lease.port < 1 || state.lease.port > 65535))) {
     throw new DesktopConnectionError("桌面连接记录无效或 Codex 目录已改变，请检查 connection.json；原文件已保留。");

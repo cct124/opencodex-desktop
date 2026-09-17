@@ -32,6 +32,7 @@ const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request
 let app: Awaited<ReturnType<typeof launch>> | undefined;
 try {
   app = await launch();
+  const originalUrl = app.url;
   const page = await fetch(app.url, { signal: AbortSignal.timeout(10000) });
   if (!page.ok || !(await page.text()).includes("<html")) throw new Error("Packaged dashboard did not load");
   const health = await (await fetch(new URL("healthz", app.url))).json() as { version?: string; pid?: number };
@@ -44,15 +45,16 @@ try {
   await app.command(JSON.stringify({ type: "import-config", config: JSON.stringify(config) }), "reconfigure");
   await app.stop();
   app = await launch();
+  if (app.url !== originalUrl) throw new Error("Packaged runtime changed its saved port after restart");
   if (readdirSync(join(data, ".opencodex/backups")).length !== 1) throw new Error("Import did not create a settings backup");
-  const response = await fetch(new URL("v1/responses", app.url), { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+  const response = await fetch(new URL("v1/responses", originalUrl), { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "fixture/desktop-package-test", input: "Reply packaged-provider-ok", stream: true }), signal: AbortSignal.timeout(20000) });
   const text = await response.text();
   if (!response.ok || !text.includes("packaged-provider-ok") || !text.includes("response.completed") || requests !== 1) throw new Error("Packaged provider stream did not complete exactly once");
   if (readFileSync(join(client, "config.toml"), "utf8") !== original) throw new Error("Import or request changed the unconnected client");
   await app.stop();
   verifyManifest(runtime);
-  console.log(JSON.stringify({ ok: true, version: health.version, relocatedRuntime: true, systemOnlyPath: true, settingsPersistedAndBackedUp: true, mockProviderStreamCompleted: true, resourcesUnmodified: true, fixtureUnchanged: true }));
+  console.log(JSON.stringify({ ok: true, version: health.version, relocatedRuntime: true, systemOnlyPath: true, stablePortPreserved: true, settingsPersistedAndBackedUp: true, mockProviderStreamCompleted: true, resourcesUnmodified: true, fixtureUnchanged: true }));
 } finally {
   try { if (app?.child.exitCode === null) await app.stop(); }
   finally { provider.stop(true); }
