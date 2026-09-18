@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { packagePlatform } from "./platform";
 
-export const runtimeEntries = ["src", "bin", "assets", "gui/dist", "desktop/runtime", "package.json", "bun.lock", "LICENSE", "README.md", "AGENTS_INSTALL.md"];
+export const runtimeEntries = ["src", "bin", "assets", "gui/dist", "desktop/runtime", "package.json", "bun.lock", "LICENSE", "README.md", "AGENTS_INSTALL.md", "native/remote-workspace-helper/Cargo.toml", "native/remote-workspace-helper/Cargo.lock", "native/remote-workspace-helper/src"];
 
 export function safeBuildDirectory(repo: string, directory: string): string {
   const root = realpathSync(repo);

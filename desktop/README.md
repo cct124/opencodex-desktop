@@ -11,8 +11,17 @@
 - 上游：<https://github.com/lidge-jun/opencodex>
 - 起点：`v2.50.0`
 - 提交：`2d4d7a22381a2e497c2442902104619e25f937c7`
-- 桌面集成分支：`desktop/main`
+- 当前同步：`v2.57.0`（桌面版 `0.1.3`），运行时跟随上游固定为 Bun `1.4.0`。
+- 桌面集成分支：`codex/desktop-m3-distribution`
 - 公开 fork：<https://github.com/cct124/opencodex-desktop>。
+
+### 独立审批模型
+
+上游 `2.57.0` 支持按提供方或模型选择审批模型。管理面板中进入“提供方”并打开“编辑 JSON”，在现有 `providers` 下找到目标提供方对象，增加 `"autoReviewModel": "gpt-6-astra"`，保留其余配置后保存。编辑器展示的是包含 `providers` 的配置对象，不要用单个提供方对象替换整个内容。面板目前没有专门的审批模型下拉框。
+
+如只覆盖某个上游模型，可增加 `"autoReviewModelOverrides": { "deepseek-flash": "gpt-6-astra" }`，其中模型键必须使用该提供方实际的上游模型 ID。单模型选择优先于提供方选择，其余模型继续使用根层 `auto_review_model` 或上游默认行为。
+
+目标必须存在于同步后的模型目录。裸 ID 优先匹配当前提供方自己的模型，再匹配原生目录行；因此选择原生账号模型前，应确认当前提供方没有同名模型。选择其他提供方模型时使用完整的 `provider/model` 标识。保存后等待目录同步，并在新 Codex 任务中验证；实际使用哪一方额度取决于最终解析的模型路由。规范的 `openai` 提供方不接受这两个字段。详见 [上游提供方说明](../docs-site/src/content/docs/guides/providers.md#approval-reviewer-per-provider)。
 
 ## 自动构建与版本
 
@@ -34,11 +43,11 @@
 
 普通分支提交生成测试包；推送与桌面版本匹配的 `desktop-v<版本>` 标签后，工作流自动构建并发布 [GitHub 预发布版本](https://github.com/cct124/opencodex-desktop/releases)。三个平台必须全部通过验收；发布任务还会核对提交、版本、文件列表与 SHA-256，再上传三个安装包、对应校验文件和按平台命名的构建信息。Release 附件使用 `OpenCodex-Desktop_...` 文件名，校验文件和构建信息同步使用该名称。
 
-维护者先更新桌面 package、Cargo 和锁文件，并新增 `desktop/releases/<版本>.md` 发布说明，提交并推送代码。确认待发布提交后，以当前 `0.1.2` 为例：
+维护者先更新桌面 package、Cargo 和锁文件，并新增 `desktop/releases/<版本>.md` 发布说明，提交并推送代码。确认待发布提交后，以当前 `0.1.3` 为例：
 
 ```bash
-git tag -a desktop-v0.1.2 -m "OpenCodex Desktop 0.1.2"
-git push origin desktop-v0.1.2
+git tag -a desktop-v0.1.3 -m "OpenCodex Desktop 0.1.3"
+git push origin desktop-v0.1.3
 ```
 
 只对尚未发布的新版本创建标签，不移动已有发布标签。标签提交必须包含本自动发布工作流。失败后可在该标签的 Actions 运行中重试失败任务；工作流会继续上传自己的未发布草稿，全部校验通过后才公开。已公开的完整版本和手动创建的发布不会被覆盖。

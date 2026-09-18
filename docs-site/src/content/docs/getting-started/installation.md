@@ -14,7 +14,7 @@ The instructions below install the upstream CLI.
 
 | Requirement | Why |
 | --- | --- |
-| **[Node](https://nodejs.org) ≥ 18** | `ocx` runs on the Bun runtime, but the runtime is bundled automatically on `npm install` — you do **not** need to install Bun yourself. |
+| **[Node](https://nodejs.org) ≥ 18** | `ocx` runs on the Bun runtime, but the runtime is bundled automatically by the npm or pnpm install — you do **not** need to install Bun yourself. |
 | **[OpenAI Codex](https://openai.com/codex)** (CLI, App, or SDK) | The client opencodex sits in front of. opencodex writes to `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). |
 | A provider account or API key | Anthropic, xAI, Kimi, Ollama Cloud, OpenRouter, an OpenAI-compatible endpoint, or your ChatGPT login. |
 
@@ -22,6 +22,12 @@ The instructions below install the upstream CLI.
 
 ```bash
 npm install -g @bitkyc08/opencodex
+```
+
+With pnpm 10.4 or later:
+
+```bash
+pnpm add -g --allow-build=bun @bitkyc08/opencodex
 ```
 
 :::note[npm blocked the bun postinstall?]
