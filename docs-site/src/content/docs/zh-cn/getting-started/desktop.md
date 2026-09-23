@@ -12,13 +12,13 @@ description: 实验性桌面 fork 的 Windows 和 macOS 安装包、独立桌面
 
 每个下载包含安装文件、SHA-256 校验文件及记录提交、架构、桌面版/后端/Bun 版本的 `build-info.json`，保留 14 天。该平台必须完成构建和独立模拟提供方请求测试，才会上传产物。也支持手动运行工作流；测试使用模拟提供方，不使用模型密钥。
 
-桌面版从 **0.1.0** 起独立维护，不再跟随后端版本。桌面控制页同时显示两个版本；管理页面原有徽标仍表示 OpenCodex 后端版本。维护时同步修改 `desktop/package.json` 与 `desktop/src-tauri/Cargo.toml`，运行 `cargo check --offline --manifest-path desktop/src-tauri/Cargo.toml` 更新锁文件。构建会拒绝桌面版本不一致或混用构建资源。
+桌面版从 **0.1.0** 起独立维护，不再跟随后端版本。桌面控制页同时显示两个版本；管理页面原有徽标仍表示 OpenCodex 后端版本。维护时同步修改 `desktop-fork/package.json` 与 `desktop-fork/src-tauri/Cargo.toml`，运行 `cargo check --offline --manifest-path desktop-fork/src-tauri/Cargo.toml` 更新锁文件。构建会拒绝桌面版本不一致或混用构建资源。
 
 此前安装 **2.50.0** Windows 测试包的用户，需要先退出、卸载并保留应用数据，再安装 **0.1.0**。这只在切换版本线时需要一次，后续正常递增升级；Windows 禁止降级的保护仍保留。
 
 ## 自动发布桌面版本
 
-推送 `desktop-v<版本>` 标签后，同一工作流会构建三个平台的安装包，并自动发布到 [GitHub Releases](https://github.com/cct124/opencodex-desktop/releases)，标记为预发布。普通分支提交只生成测试包。维护者先同步更新桌面 package、Cargo 版本和锁文件，新增 `desktop/releases/<版本>.md` 发布说明，再提交并推送代码。以当前 0.1.1 为例，在包含自动发布工作流的目标提交上执行：
+推送 `desktop-v<版本>` 标签后，同一工作流会构建三个平台的安装包，并自动发布到 [GitHub Releases](https://github.com/cct124/opencodex-desktop/releases)，标记为预发布。普通分支提交只生成测试包。维护者先同步更新桌面 package、Cargo 版本和锁文件，新增 `desktop-fork/releases/<版本>.md` 发布说明，再提交并推送代码。以当前 0.1.1 为例，在包含自动发布工作流的目标提交上执行：
 
 ```sh
 git tag -a desktop-v0.1.1 -m "OpenCodex Desktop 0.1.1"
@@ -39,11 +39,11 @@ NSIS 安装包携带桌面壳、固定版本 Bun、代理源码、生产依赖�
 
 macOS 13 及以上系统打开对应架构的 `.dmg`，将完整应用拖入 Applications；替换前先退出旧应用。Mac 包采用 ad-hoc 签名，未使用 Apple 开发者签名或公证，因此 macOS 可能阻止首次启动，需要在隐私与安全设置中明确允许。参考 [Tauri 签名说明](https://v2.tauri.app/distribute/sign/macos/)。安装包携带原架构的 Bun 和生产依赖。
 
-本地构建需要在目标原生架构上准备 Rust 1.92.0、Xcode Command Line Tools 和仓库指定的 Bun。按锁文件安装根目录、GUI 和 desktop 依赖后，执行 `cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml`，再执行 `bun run desktop/scripts/build-installer.ts`。安装包和校验文件统一收集到 `desktop/.bundle/artifacts/`。
+本地构建需要在目标原生架构上准备 Rust 1.92.0、Xcode Command Line Tools 和仓库指定的 Bun。按锁文件安装根目录、GUI 和 desktop 依赖后，执行 `cargo fetch --locked --manifest-path desktop-fork/src-tauri/Cargo.toml`，再执行 `bun run desktop-fork/scripts/build-installer.ts`。安装包和校验文件统一收集到 `desktop-fork/.bundle/artifacts/`。
 
 ## 启动与连接
 
-从开始菜单打开 OpenCodex Desktop；源码开发可运行构建后的 `desktop/src-tauri/target/debug/opencodex-desktop.exe`。
+从开始菜单打开 OpenCodex Desktop；源码开发可运行构建后的 `desktop-fork/src-tauri/target/debug/opencodex-desktop.exe`。
 配置保存在 `%LOCALAPPDATA%/me.opencodex.desktop/`，退出重开后仍保留。关闭窗口会驻留托盘。
 Mac 从 Applications 启动，数据目录为 `~/Library/Application Support/me.opencodex.desktop/`。
 从其他 Windows 桌面软件启动时也使用同一数据目录。控制页显示已解析的实际路径，打开目录失败时会显示错误。
@@ -60,7 +60,7 @@ Mac 从 Applications 启动，数据目录为 `~/Library/Application Support/me.
 桌面控制页可在确认后导入原有 OpenCodex 的 `config.json` 或选择的 JSON 文件。导入会替换桌面配置并重启，旧桌面配置备份到应用数据目录的 `.opencodex/backups/`，源文件不变。
 配置中的提供方密钥会被复制；OAuth 账户库、服务、PID 和原生恢复日志不随配置文件导入。环境变量引用仍保留为引用，不转换为文件中的密钥。
 
-`desktop/dev.ps1` 使用 `--preview` 创建独立开发会话。切换预览与持久化模式前，请退出已有实例。
+`desktop-fork/dev.ps1` 使用 `--preview` 创建独立开发会话。切换预览与持久化模式前，请退出已有实例。
 
 持久化桌面模式的原生 Codex 请求使用现有上游 HTTPS/SSE 实现。普通 CLI 及明确启用 WebSocket 的第三方提供方保留原传输逻辑。
 

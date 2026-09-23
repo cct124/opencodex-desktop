@@ -12,9 +12,9 @@ function readFile(file) {
 }
 
 function releaseVersion(repo, ref) {
-  const desktop = JSON.parse(readFile(path.join(repo, 'desktop/package.json')));
+  const desktop = JSON.parse(readFile(path.join(repo, 'desktop-fork/package.json')));
   const runtime = JSON.parse(readFile(path.join(repo, 'package.json')));
-  const cargo = readFile(path.join(repo, 'desktop/src-tauri/Cargo.toml')).toString();
+  const cargo = readFile(path.join(repo, 'desktop-fork/src-tauri/Cargo.toml')).toString();
   const pkg = cargo.match(/\[package\]([\s\S]*?)(?=\n\[|$)/)?.[1];
   check(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(desktop.version), 'Invalid desktop version');
   check(pkg?.match(/^version\s*=\s*"([^"]+)"/m)?.[1] === desktop.version, 'Desktop and Cargo versions differ');
@@ -49,7 +49,7 @@ function verifyArtifacts(repo, directory, sha, ref) {
     assets.push({ name: `${name}.sha256`, data: Buffer.from(`${sha256}  ${name}\n`) });
     assets.push({ name: `build-info-${platform}.json`, data: Buffer.from(JSON.stringify({ ...info, installer: name }, null, 2) + '\n') });
   }
-  const notes = readFile(path.join(repo, 'desktop/releases', `${versions.desktopVersion}.md`)).toString().trim();
+  const notes = readFile(path.join(repo, 'desktop-fork/releases', `${versions.desktopVersion}.md`)).toString().trim();
   check(notes.length > 0, 'Add desktop release notes before publishing');
   return { ...versions, sha, assets: assets.map(asset => ({ ...asset, digest: `sha256:${digest(asset.data)}` })), notes };
 }

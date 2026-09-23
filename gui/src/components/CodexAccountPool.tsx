@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "../i18n/shared";
 import { IconPlus } from "../icons";
 import { EmptyState, type NoticeTone } from "../ui";
+import { confirmAction, requestTextValue } from "../action-dialogs";
+import { credentialAliasRejection, CREDENTIAL_ALIAS_MAX_LENGTH } from "../credential-alias";
 import AddCodexAccountModal from "./AddCodexAccountModal";
 import { useCodexAccountPool, type CodexAccountPoolController } from "../hooks/useCodexAccountPool";
 import { useMainDeviceReauth } from "./use-main-device-reauth";
+import NativeMainProfiles from "./NativeMainProfiles";
 import type { ReactNode } from "react";
 import type { CodexAccountModeState } from "../codex-multi-state";
 import CodexAutoSwitchSetting from "./CodexAutoSwitchSetting";
@@ -71,7 +74,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
   // but stays inert (no load, no polling) whenever a shared controller was injected.
   const ownController = useCodexAccountPool(apiBase, !injectedController);
   const controller = injectedController ?? ownController;
-  const { accounts, activeId, loadState, switchingId, pauseUpdatingId, priorityUpdatingId, pausingExhausted, activePinnedId, load } = controller;
+  const { accounts, activeId, loadState, refreshFailed, switchingId, pauseUpdatingId, priorityUpdatingId, pausingExhausted, activePinnedId, load } = controller;
   // #3898: the native-main device reauth drives the dedicated namespace; a
   // completed flow refreshes the account list so the card leaves reauth state.
   const mainReauth = useMainDeviceReauth(apiBase, () => { void load(); });
@@ -231,7 +234,12 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
   };
 
   const editAlias = async (account: CodexAccountEntry) => {
-    const entered = window.prompt(t("prov.aliasPrompt"), account.alias ?? "");
+    const entered = await requestTextValue({
+      message: t("prov.aliasPrompt"),
+      initialValue: account.alias ?? "",
+      maxLength: CREDENTIAL_ALIAS_MAX_LENGTH,
+      validate: value => credentialAliasRejection(value, t),
+    });
     if (entered === null) return;
     const result = await controller.saveAlias(account.id, entered);
     showActionFeedback(t(result.ok ? "prov.aliasSaved" : "prov.aliasSaveFailed"), result.ok ? "ok" : "err");
@@ -267,7 +275,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
 
   const remove = async (id: string) => {
     const label = accounts.find(account => account.id === id)?.email ?? t("pws.accountOrdinal", { count: "1" });
-    if (!window.confirm(t("codexAuth.removeConfirm", { id: label }))) return;
+    if (!(await confirmAction({ message: t("codexAuth.removeConfirm", { id: label }), confirmLabel: t("common.remove"), tone: "danger" }))) return;
     const result = await controller.removeAccount(id);
     if (!result.ok) {
       showActionFeedback(t("codexAuth.removeFailed"), "err");
@@ -475,6 +483,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
       <CodexAccountPoolLoadStates
         t={t}
         loadState={loadState}
+        refreshFailed={refreshFailed}
         accountsCount={accounts.length}
         onRetry={() => { void load(); }}
       />
@@ -501,6 +510,12 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
             doctorCopyOutcomeFor={showDoctorCopy ? doctorCopy.outcomeFor : undefined}
             onManageMainHardLock={hasMainHardLockSetting ? manageMainHardLock : undefined}
             mainReauth={mainReauth}
+          />
+
+          <NativeMainProfiles
+            apiBase={apiBase}
+            disabled={mainReauthActive}
+            onChanged={() => load(false)}
           />
 
           <div className="section-sep">
@@ -546,6 +561,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
         subscribeLoadObserver={controller.subscribeLoadObserver}
         readLastActive={controller.readLastActive}
         onStrategyResolved={setPoolStrategy}
+        threshold={autoSwitch.threshold}
       />
 
       <CodexAuthAdvancedSettings
@@ -599,6 +615,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
           accountModeState={accountModeState}
           switchingId={switchingId}
           orderBusy={priorityUpdatingId !== null}
+          threshold={poolStrategy && poolStrategy !== "round-robin" ? autoSwitchThreshold : undefined}
           onCancel={() => setConfirm(null)}
           onConfirm={() => { void setActive(confirm.id === "__main__" ? "__main__" : confirm.id); }}
         />

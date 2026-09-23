@@ -15,10 +15,19 @@ import {
 import { clearResponseStateForTests, expandPreviousResponseInput } from "../../src/responses/state";
 import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 const originalFetch = globalThis.fetch;
+let releaseInheritedSpendHome: (() => void) | undefined;
+// Taken per inherited-home dispatch because the pool retry row installs a different home. The
+// ??= keeps a second call inside one case idempotent rather than replacing the release callback
+// it would need; no row here calls it twice today, so this is defence, not a fixed regression.
+const takeInheritedSpendHome = (): void => { releaseInheritedSpendHome ??= acquireOwnedSpendHome(); };
 beforeEach(() => { clearResponseStateForTests(); });
 afterEach(() => {
+  // Released first so a failed row cannot leak its writer lease into the next case.
+  releaseInheritedSpendHome?.();
+  releaseInheritedSpendHome = undefined;
   globalThis.fetch = originalFetch;
   clearResponseStateForTests();
 });
@@ -89,12 +98,16 @@ async function withPoolHome<T>(run: () => Promise<T>): Promise<T> {
   const previousCodexHome = process.env.CODEX_HOME;
   process.env.OPENCODEX_HOME = home;
   process.env.CODEX_HOME = home;
+  // Taken after the pool case installs its home so its direct dispatch owns that journal.
+  const releaseSpendHome = acquireOwnedSpendHome();
   clearCodexUpstreamHealth();
   clearThreadAccountMap();
   clearAccountQuota();
   try {
     return await run();
   } finally {
+    // Released before removal or env restoration so the lease cannot outlive this home.
+    releaseSpendHome();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearAccountQuota();
@@ -137,6 +150,7 @@ function overLimitResponsePayload(id = "resp-plaintext-v2-overflow") {
 
 describe("plaintext v2 agent messages at the Responses server boundary", () => {
   test.each(["json", "legacy-tee", "eager-relay"] as const)("null namespace restores before %s delivery and continuation storage", async mode => {
+    takeInheritedSpendHome();
     const id = `resp-null-namespace-${mode}`;
     const item = { ...completedResponsePayload(id).output[0]!, namespace: null };
     const payload = { id, status: "completed", output: [item] };
@@ -156,6 +170,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("rewrites the canonical request and restores every SSE response snapshot", async () => {
+    takeInheritedSpendHome();
     const sentBodies: string[] = [];
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       sentBodies.push(typeof init?.body === "string" ? init.body : "");
@@ -206,7 +221,33 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
     expect(clientBody).toContain('"encrypted_function_args":[]');
   });
 
+  test("rewrites a Responses Lite default catalog and restores its delegated call", async () => {
+    takeInheritedSpendHome();
+    let sent: Record<string, any> | undefined;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      sent = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify(completedResponsePayload()), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    const { tools, ...body } = await collaborationRequest().json() as Record<string, any>;
+    body.input.unshift({ type: "additional_tools", role: "developer", tools });
+    const request = new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const response = await handleResponses(request, config(true), { model: "", provider: "" });
+    expect(response.status).toBe(200);
+    expect(sent?.tools).toBeUndefined();
+    expect(sent?.input[0].tools[0].name).toBe(PLAINTEXT_V2_COLLABORATION_NAMESPACE);
+    expect(sent?.input[0].tools[0].tools[0].parameters.properties.message.encrypted).toBeUndefined();
+    const result = await response.json() as { output: Array<Record<string, unknown>> };
+    expect(result.output[0]!.namespace).toBe("collaboration");
+    expect(result.output[0]!.name).toBe("spawn_agent");
+    expect(result.output[0]!.encrypted_function_args).toEqual([]);
+  });
+
   test("restores the namespace in bounded JSON responses", async () => {
+    takeInheritedSpendHome();
     globalThis.fetch = (async () => new Response(JSON.stringify(completedResponsePayload()), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -225,6 +266,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("rejects an unclassified successful response while restoration is required", async () => {
+    takeInheritedSpendHome();
     globalThis.fetch = (async () => new Response(
       JSON.stringify(completedResponsePayload()),
       { status: 200 },
@@ -244,6 +286,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("restores aliases after SSE snapshot repair copies request tools and tool choice", async () => {
+    takeInheritedSpendHome();
     globalThis.fetch = (async () => {
       const response = completedResponsePayload("resp-snapshot-sse");
       return new Response(
@@ -279,6 +322,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("restores aliases after bounded JSON snapshot repair", async () => {
+    takeInheritedSpendHome();
     globalThis.fetch = (async () => new Response(
       JSON.stringify(completedResponsePayload("resp-snapshot-json")),
       { status: 200, headers: { "content-type": "application/json" } },
@@ -304,6 +348,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("keeps the marker and reserved namespace when the option is disabled", async () => {
+    takeInheritedSpendHome();
     const sentBodies: string[] = [];
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       sentBodies.push(typeof init?.body === "string" ? init.body : "");
@@ -324,6 +369,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("keeps the whole request unchanged when tool-search history conflicts with the alias", async () => {
+    takeInheritedSpendHome();
     const sentBodies: string[] = [];
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       sentBodies.push(typeof init?.body === "string" ? init.body : "");
@@ -425,6 +471,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("fails closed for over-limit streamed responses in both relay modes", async () => {
+    takeInheritedSpendHome();
     for (const streamMode of ["legacy-tee", "eager-relay"] as const) {
       globalThis.fetch = (async () => new Response(
         `event: response.completed\ndata: ${JSON.stringify({
@@ -451,6 +498,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("rejects over-limit bounded JSON before HTTP or WebSocket reframing", async () => {
+    takeInheritedSpendHome();
     const fixtureId = "plaintext-v2-bounded-json-fixture";
     const fixtureModel = "fixture-model";
     const mutableRegistry = PROVIDER_REGISTRY as unknown as Array<Record<string, unknown>>;
@@ -503,6 +551,7 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
   });
 
   test("rejects an over-limit JSON response and does not retain it for continuation", async () => {
+    takeInheritedSpendHome();
     const sentBodies: string[] = [];
     let requestIndex = 0;
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -540,12 +589,14 @@ describe("plaintext v2 agent messages at the Responses server boundary", () => {
     const secondBody = await second.text();
     expect({ status: second.status, body: secondBody, sends: sentBodies.length }).toEqual({
       status: 400,
-      body: expect.stringContaining("continuation state is unavailable or expired"),
+      // One message for every local replay failure, so which one occurred is not readable here.
+      body: expect.stringContaining("Continuation state is unavailable or corrupt"),
       sends: 1,
     });
   });
 
   test.each([undefined, "websocket"] as const)("stores the client namespace across an option change on %s", async inboundTransport => {
+    takeInheritedSpendHome();
     const sentBodies: string[] = [];
     let requestIndex = 0;
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -604,6 +655,7 @@ test("plaintext startup warning requires explicit opt-in and names retention", (
 for (const streamMode of ["legacy-tee", "eager-relay"] as const) {
   for (const refusal of ["malformed", "unknown-alias", "conflicting-binding"] as const) {
     test(`${streamMode} ${refusal} is refused without caching or retry`, async () => {
+      takeInheritedSpendHome();
       let sends = 0;
       const sent: string[] = [];
       globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
@@ -634,6 +686,7 @@ for (const streamMode of ["legacy-tee", "eager-relay"] as const) {
 }
 
 test("malformed bounded JSON is a single-attempt 502", async () => {
+  takeInheritedSpendHome();
   let sends = 0;
   globalThis.fetch = (async () => { sends += 1; return new Response("{malformed", { headers: { "content-type": "application/json" } }); }) as typeof fetch;
   const response = await handleResponses(collaborationRequest(), config(true), { model: "", provider: "" });
@@ -643,6 +696,7 @@ test("malformed bounded JSON is a single-attempt 502", async () => {
 });
 
 test("cross-coordinate namespace conflict cannot publish continuation", async () => {
+  takeInheritedSpendHome();
   let sends = 0;
   globalThis.fetch = (async () => {
     sends += 1;
@@ -662,6 +716,7 @@ test("cross-coordinate namespace conflict cannot publish continuation", async ()
 
 
 test("concurrent native requests do not share plaintext alias metadata", async () => {
+  takeInheritedSpendHome();
   const pending: Array<{ enabled: boolean; resolve: (value: Response) => void }> = [];
   let bothReady!: () => void;
   const ready = new Promise<void>(resolve => { bothReady = resolve; });

@@ -9,14 +9,19 @@ import {
   closedBeforeTerminalMessage,
   codexWsFailureDetail,
   markCodexWsStage,
+  projectCodexWsFailure,
   readCodexWsStage,
   type CodexWsFailureStage,
   type CodexWsStageRecord,
 } from "../../src/server/responses/codex-ws-wire";
+import { permitsResend, resendPermission } from "../../src/lib/request-failure-model";
 import {
   codexWsUpstreamFetch,
   CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS,
 } from "../../src/server/responses/ws-upstream";
+import { codexWsExchange } from "../../src/server/responses/codex-ws-exchange";
+import { CodexWsSession } from "../../src/server/responses/codex-ws-session";
+import { prepareCodexWsRequest } from "../../src/server/responses/codex-ws-request";
 
 /**
  * #4191: a long Codex thread died only through the proxy, and every variant of
@@ -37,6 +42,7 @@ class FakeWebSocket {
   static script: (ws: FakeWebSocket) => void = () => {};
   url: string;
   sent: string[] = [];
+  closed = false;
   listeners = new Map<string, Listener[]>();
 
   constructor(url: string) {
@@ -63,7 +69,7 @@ class FakeWebSocket {
     this.sent.push(data);
   }
 
-  close() {}
+  close() { this.closed = true; }
 }
 
 const RealWebSocket = globalThis.WebSocket;
@@ -155,6 +161,41 @@ describe("codex WS failure classification", () => {
     // The send is what makes a turn possibly live upstream, so it is read first.
     expect(classifyCodexWsFailure(stage({ sent: false, upstreamFrames: 4, relayedEvents: 2 })))
       .toBe("before-send");
+  });
+
+  /**
+   * The same four outcomes said in the shared stage-and-cause vocabulary, so a WebSocket failure
+   * can be compared with an HTTP one instead of being the one surface with private words for it.
+   * These rows are asserted individually because a projection is a mapping, and a mapping whose
+   * rows are only checked for totality can be rewritten wholesale without any case objecting.
+   */
+  test("projects each outcome onto the shared stage and cause", () => {
+    expect(projectCodexWsFailure(stage({ sent: false, elapsedMs: null })))
+      .toEqual({ stage: "pre-header", cause: "transport-unsent" });
+    expect(projectCodexWsFailure(stage()))
+      .toEqual({ stage: "pre-header", cause: "transport-ambiguous" });
+    expect(projectCodexWsFailure(stage({ upstreamFrames: 3, controlFrames: 3 })))
+      .toEqual({ stage: "protocol-prelude", cause: "transport-ambiguous" });
+    expect(projectCodexWsFailure(stage({ upstreamFrames: 9, controlFrames: 2, relayedEvents: 7 })))
+      .toEqual({ stage: "semantic-output", cause: "transport-ambiguous" });
+  });
+
+  /**
+   * The shared table has to reach the same verdict the transport already enforces on its own, or
+   * one of the two is lying about this exchange. A create frame that never left is the only
+   * outcome the origin provably did not see.
+   */
+  test("only an unsent create frame may be sent again", () => {
+    const resendable = ([
+      stage({ sent: false, elapsedMs: null }),
+      stage(),
+      stage({ upstreamFrames: 3, controlFrames: 3 }),
+      stage({ upstreamFrames: 9, controlFrames: 2, relayedEvents: 7 }),
+    ]).map(candidate => {
+      const projected = projectCodexWsFailure(candidate);
+      return permitsResend(resendPermission(projected.stage, projected.cause));
+    });
+    expect(resendable).toEqual([true, false, false, false]);
   });
 
   test("renders every field, with n/a for the durations that do not exist yet", () => {
@@ -469,5 +510,38 @@ describe("codex ws stage record marker (#4191)", () => {
       if (typeof value === "string") expect(value.length).toBeLessThan(64);
       expect(key).not.toContain("reason");
     }
+  });
+});
+
+describe("native-control attach conflict", () => {
+  test("an already-owned channel fails the turn instead of falling back to HTTP", async () => {
+    installFake(ws => { ws.emit("open", {}); });
+    const init = streamingInit();
+    const prepared = prepareCodexWsRequest(CODEX_URL, init)!;
+    const session = new CodexWsSession("wss://chatgpt.com/backend-api/codex/responses", prepared.headers, true);
+    let fallbacks = 0;
+    const nativeControl = {
+      kind: "injection" as const,
+      relayActive: false,
+      attached: true,
+      ended: false,
+      attach() { throw new Error("Native injection transport is already owned."); },
+      observe() { return false; },
+      steer() { throw new Error("unreachable"); },
+      continue() { return false; },
+    };
+    const options = { session, url: CODEX_URL, init, prepared, nativeControl,
+      sseFallback: (async () => { fallbacks++; throw new Error("attach conflict must not fall back"); }) as typeof fetch };
+    try {
+      expect(session.reserve()).toBe(true);
+      const response = await codexWsExchange(options);
+      const ws = FakeWebSocket.instances.at(-1)!;
+      expect(fallbacks).toBe(0);
+      expect(ws.sent).toHaveLength(0);
+      expect(response.status).toBe(502);
+      expect(((await response.json()) as { error: { message: string } }).error.message).toContain("already owned");
+      expect(ws.closed).toBe(true);
+      expect([...ws.listeners.values()].every(listeners => listeners.length === 0)).toBe(true);
+    } finally { session.dispose(); }
   });
 });

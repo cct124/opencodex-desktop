@@ -5,14 +5,25 @@ import { join } from "node:path";
 import { apiKeyAccountLogLabel } from "../../src/codex/account-label";
 import { readUsageEntries, resetUsageReadCacheForTests } from "../../src/usage/log";
 import { loadConfig, saveConfig } from "../../src/config";
-import { clearKeyCooldowns, rotateKeyOn429 } from "../../src/providers/key-failover";
+import { clearKeyCooldowns, getKeyCooldownUntil, rotateKeyOn429 } from "../../src/providers/key-failover";
 import { deriveXaiConvId } from "../../src/providers/xai-transport";
-import { clearReasoningReplayCacheForTests } from "../../src/responses/reasoning-replay-cache";
+import {
+  clearReasoningReplayCacheForTests,
+  reasoningReplayDestinationIdentity,
+  reasoningReplayKeyCredentialIdentity,
+} from "../../src/responses/reasoning-replay-cache";
+import {
+  bridgeSearchReplayScope,
+  clearBridgeSearchReplayCacheForTests,
+  rememberBridgeSearchReplay,
+} from "../../src/responses/bridge-search-replay-cache";
 import { startServer } from "../../src/server";
+import { handleResponses } from "../../src/server/responses";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { managementFetch } from "../helpers/management-auth";
+import { resolveContextPrincipal } from "../../src/server/auth-cors";
 import { resetProviderRequestPacingForTest, setProviderRequestPacingRuntimeForTest, waitForProviderRequestSlot } from "../../src/providers/request-pacing";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../../src/providers/api-key-selection";
 import { routedProviderConfig } from "../../src/router";
@@ -30,6 +41,7 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = testDir;
   clearKeyCooldowns();
   clearReasoningReplayCacheForTests();
+  clearBridgeSearchReplayCacheForTests();
 });
 
 afterEach(() => {
@@ -42,6 +54,7 @@ afterEach(() => {
   if (testDir) removeTreeWithRetry(testDir);
   clearKeyCooldowns();
   clearReasoningReplayCacheForTests();
+  clearBridgeSearchReplayCacheForTests();
 });
 
 describe("server 429 key failover (end-to-end)", () => {
@@ -495,6 +508,128 @@ describe("server 429 key failover (end-to-end)", () => {
     } finally { await server.stop(true); }
   });
   }
+
+  test("a 429 dated in the body parks the failed key until that instant, outranking Retry-After", async () => {
+    // #4024 regression, through the real dispatch path. The unit tests cover
+    // parseQuotaResetAt/readQuotaResetAt in isolation; nothing exercised
+    // adapter-dispatch actually READING the body and handing quotaResetAt to
+    // rotateProviderTransportOn429. Dropping it there would leave every unit
+    // test green while the key came back after the header's 30s and took the
+    // same 429 again — which is the bug.
+    const resetAt = new Date(Date.now() + 6 * 60 * 60_000);
+    const stamp = resetAt.toISOString().replace("T", " ").slice(0, 19); // bare form, read as UTC
+    const seenAuth: string[] = [];
+    upstream = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(req) {
+        seenAuth.push(req.headers.get("authorization") ?? "");
+        if (seenAuth.length === 1) {
+          return new Response(JSON.stringify({
+            error: { code: "rate_limit_error", message: `Weekly Limit Exhausted. Your limit will reset at ${stamp}` },
+          }), { status: 429, headers: { "retry-after": "30", "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({
+          id: "chatcmpl-dated", object: "chat.completion",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok after dated rotate" }, finish_reason: "stop" }],
+        }), { headers: { "content-type": "application/json" } });
+      },
+    });
+    const config: OcxConfig = {
+      port: 0, hostname: "127.0.0.1", defaultProvider: "dated",
+      providers: {
+        dated: {
+          adapter: "openai-chat",
+          baseUrl: `http://127.0.0.1:${upstream.port}/v1`,
+          allowPrivateNetwork: true,
+          apiKey: "key-dated-000111222333",
+          apiKeyPool: [
+            { id: "d1", key: "key-dated-000111222333", addedAt: 1 },
+            { id: "d2", key: "key-dated-444555666777", addedAt: 2 },
+          ],
+        },
+      },
+    } as OcxConfig;
+    saveConfig(config);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "dated/some-model", input: "hello", stream: false }),
+      });
+      expect(res.status).toBe(200);
+      await res.json();
+      expect(seenAuth[1]).toBe("Bearer key-dated-444555666777");
+
+      const cooldownUntil = getKeyCooldownUntil("dated", "d1");
+      expect(cooldownUntil).not.toBeNull();
+      // The body's instant, not the header's 30s. Compared with a wide window
+      // because the cooldown is anchored to the server's Date.now(), not ours.
+      expect(cooldownUntil!).toBeGreaterThan(Date.now() + 5 * 60 * 60_000);
+      expect(cooldownUntil!).toBeLessThanOrEqual(resetAt.getTime() + 60_000);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("client cancellation during the 429 body peek does not rotate or cool the key", async () => {
+    const bodyRead = Promise.withResolvers<void>();
+    const bodyCancelled = Promise.withResolvers<void>();
+    const seenAuth: string[] = [];
+    upstream = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(req) {
+        seenAuth.push(req.headers.get("authorization") ?? "");
+        let pulls = 0;
+        return new Response(new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) {
+              controller.enqueue(new TextEncoder().encode('{"error":{"code":"rate_limit_error","message":"Weekly Limit Exhausted.'));
+              return;
+            }
+            bodyRead.resolve();
+            return new Promise<void>(() => {});
+          },
+          cancel() {
+            bodyCancelled.resolve();
+          },
+        }), { status: 429, headers: { "content-type": "application/json" } });
+      },
+    });
+    const config = {
+      port: 0, hostname: "127.0.0.1", defaultProvider: "cancelled",
+      providers: {
+        cancelled: {
+          adapter: "openai-chat", authMode: "key",
+          baseUrl: `http://127.0.0.1:${upstream.port}/v1`, allowPrivateNetwork: true,
+          apiKey: "key-canc-000111222333",
+          apiKeyPool: [
+            { id: "c1", key: "key-canc-000111222333", addedAt: 1 },
+            { id: "c2", key: "key-cancelled-444555666777", addedAt: 2 },
+          ],
+        },
+      },
+    } as OcxConfig;
+    saveConfig(config);
+    const abort = new AbortController();
+    const pending = handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cancelled/some-model", input: "hello", stream: false }),
+    }), config, { model: "", provider: "" }, { abortSignal: abort.signal });
+
+    await bodyRead.promise;
+    abort.abort(new DOMException("client closed", "AbortError"));
+    const response = await pending;
+
+    expect(response.status).toBe(499);
+    expect(await response.json()).toMatchObject({ error: { code: "client_cancelled" } });
+    await bodyCancelled.promise;
+    expect(seenAuth).toEqual(["Bearer key-canc-000111222333"]);
+    expect(getKeyCooldownUntil("cancelled", "c1")).toBeNull();
+    expect(loadConfig().providers.cancelled?.apiKey).toBe("key-canc-000111222333");
+  });
 
   test("reasoning replay misses after a 429 rotates to a different physical key", async () => {
     const model = "reasoning-model";
@@ -1058,4 +1193,200 @@ test.each([false, true])("key refetch retains transient recovery metadata (strea
     expect(attempts?.[1]).toMatchObject({ sendCount: 2, recoveryKinds: ["key-429", "transient-5xx"],
       usage: { inputTokens: 12, outputTokens: 2 } });
   } finally { await server.stop(true); }
+});
+
+const BRIDGE_CALLER_KEY = "synthetic-bridge-caller-key";
+const BRIDGE_THREAD = "thread-keyrace";
+const BRIDGE_CELL = "ws_keyrace";
+
+function bridgedReplayConfig(baseUrl: string, pacing: boolean): OcxConfig {
+  return {
+    port: 0, hostname: "127.0.0.1", defaultProvider: "pooled",
+    apiKeys: [{ id: "bridge-caller", name: "bridge-caller", key: BRIDGE_CALLER_KEY, createdAt: "2026-01-01" }],
+    providers: { pooled: {
+      adapter: "openai-responses", baseUrl, allowPrivateNetwork: true,
+      authMode: "key", apiKey: "synthetic-first",
+      apiKeyPool: [{ id: "first", key: "synthetic-first" }, { id: "second", key: "synthetic-second" }],
+      webSearchBridge: { enabled: true, backend: "ollama" },
+      ...(pacing ? { requestPacing: { enabled: true, minIntervalMs: 100 } } : {}),
+    } },
+  } as OcxConfig;
+}
+
+/** The principal the server derives for a loopback caller that presents the fixture key. */
+function bridgeCallerPrincipal(config: OcxConfig): string {
+  const principal = resolveContextPrincipal(
+    new Request("http://127.0.0.1/v1/responses", { headers: { "x-opencodex-api-key": BRIDGE_CALLER_KEY } }),
+    config,
+    { kind: "loopback", source: "loopback" },
+  );
+  if (!principal) throw new Error("the fixture caller key must resolve to a principal");
+  return principal;
+}
+
+/** Record one executed bridged search as the FIRST pool key would have served it. */
+function seedBridgedSearch(baseUrl: string, clientPrincipalId: string): void {
+  rememberBridgeSearchReplay(
+    bridgeSearchReplayScope({
+      clientPrincipalId,
+      clientThreadId: BRIDGE_THREAD,
+      current: {
+        providerName: "pooled",
+        providerDestinationIdentity: reasoningReplayDestinationIdentity(baseUrl),
+        adapterName: "openai-responses",
+        modelId: "test",
+        credentialIdentity: reasoningReplayKeyCredentialIdentity({ apiKey: "synthetic-first" }),
+      },
+    }),
+    BRIDGE_CELL,
+    { callId: "call_ws_1", name: "web_search",
+      argumentsText: "{\"query\":\"opencodex release\"}", output: "cached bridged result" },
+  );
+}
+
+type SeenUpstreamTurn = { authorization: string | null; input: Record<string, unknown>[] };
+
+function serveBridgedUpstream(seen: SeenUpstreamTurn[]): string {
+  upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const body = await req.json() as { input?: unknown };
+    seen.push({
+      authorization: req.headers.get("authorization"),
+      input: Array.isArray(body.input) ? body.input as Record<string, unknown>[] : [],
+    });
+    return Response.json({
+      id: "resp_keyrace", object: "response", status: "completed", model: "test",
+      output: [{ type: "message", id: "msg_keyrace", role: "assistant", status: "completed",
+        content: [{ type: "output_text", text: "done", annotations: [] }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    });
+  } });
+  return `http://127.0.0.1:${upstream.port}/v1`;
+}
+
+function bridgedReplayRequest(callerKey: string | undefined, signal?: AbortSignal): RequestInit {
+  return {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "thread-id": BRIDGE_THREAD,
+      ...(callerKey ? { "x-opencodex-api-key": callerKey } : {}),
+    },
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({
+      model: "pooled/test", stream: false,
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "what is the latest release?" }] },
+        { type: "web_search_call", id: BRIDGE_CELL, status: "completed",
+          action: { type: "search", query: "opencodex release", queries: ["opencodex release"] } },
+      ],
+    }),
+  };
+}
+
+function hostedCellReachedUpstream(turn: SeenUpstreamTurn): boolean {
+  return turn.input.some(item => item.type === "web_search_call" && item.id === BRIDGE_CELL);
+}
+
+function recordedResultRestored(turn: SeenUpstreamTurn): boolean {
+  return turn.input.some(item => item.call_id === "call_ws_1");
+}
+
+test("a keyed caller's bridged search is restored on its next turn", async () => {
+  // Positive control for the two refusals below: the same seed, principal, thread and
+  // credential does restore, so a miss there is the scope doing its job, not a broken fixture.
+  const seen: SeenUpstreamTurn[] = [];
+  const baseUrl = serveBridgedUpstream(seen);
+  const config = bridgedReplayConfig(baseUrl, false);
+  saveConfig(config);
+  seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/responses", server.url), bridgedReplayRequest(BRIDGE_CALLER_KEY));
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(seen).toHaveLength(1);
+    expect(recordedResultRestored(seen[0]!)).toBe(true);
+    expect(hostedCellReachedUpstream(seen[0]!)).toBe(false);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("a keyless loopback caller neither restores nor shares a bridged search", async () => {
+  // A caller that presents no opencodex key has no principal. It must not fall into a shared
+  // bucket: seed both the keyed caller's cell and the literal bucket a fallback would have used.
+  const seen: SeenUpstreamTurn[] = [];
+  const baseUrl = serveBridgedUpstream(seen);
+  const config = bridgedReplayConfig(baseUrl, false);
+  saveConfig(config);
+  seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
+  seedBridgedSearch(baseUrl, "loopback");
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/responses", server.url), bridgedReplayRequest(undefined));
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(seen).toHaveLength(1);
+    expect(recordedResultRestored(seen[0]!)).toBe(false);
+    expect(hostedCellReachedUpstream(seen[0]!)).toBe(true);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("a dispatch-time key switch rebuilds the bridged-search restore under the new credential", async () => {
+  // Regression for the oauthDispatch rebuild order: the Responses adapter restores a replayed
+  // web_search_call from the memo keyed by _reasoningReplayScope, so the rebuild must rebind
+  // that scope to the refreshed credential BEFORE buildRequest runs. Restoring under the key
+  // whose selection just lapsed, then sending under the newly selected key, would hand the
+  // first credential's recorded result to the second credential's upstream.
+  let now = 0;
+  let resumePacing: (() => void) | undefined;
+  const queued = Promise.withResolvers<void>();
+  setProviderRequestPacingRuntimeForTest({
+    now: () => now,
+    setTimer(callback, delayMs) {
+      resumePacing = () => { now += delayMs; callback(); };
+      queued.resolve();
+      return callback;
+    },
+    clearTimer() {},
+    enqueueMicrotask: queueMicrotask,
+  });
+  const seen: SeenUpstreamTurn[] = [];
+  const baseUrl = serveBridgedUpstream(seen);
+  const config = bridgedReplayConfig(baseUrl, true);
+  saveConfig(config);
+
+  // Seed the memo under the identity the FIRST key binds: the same caller principal and thread
+  // the request below carries, but the credential whose selection is about to lapse.
+  seedBridgedSearch(baseUrl, bridgeCallerPrincipal(config));
+
+  const server = startServer(0);
+  const abort = new AbortController();
+  try {
+    await waitForProviderRequestSlot("pooled", config.providers.pooled);
+    const pending = fetch(new URL("/v1/responses", server.url), bridgedReplayRequest(BRIDGE_CALLER_KEY, abort.signal));
+    await queued.promise;
+    const selected = await managementFetch(new URL("/api/providers/keys/active", server.url), {
+      method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "pooled", id: "second" }),
+    });
+    expect(selected.status).toBe(200);
+    await selected.text();
+    resumePacing!();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.authorization).toBe("Bearer synthetic-second");
+    // Rebound before rebuild: the memo lookup misses under the new credential, so the hosted
+    // cell reaches the second key's upstream verbatim instead of the first key's result.
+    expect(hostedCellReachedUpstream(seen[0]!)).toBe(true);
+    expect(recordedResultRestored(seen[0]!)).toBe(false);
+  } finally {
+    abort.abort();
+    await server.stop(true);
+    resetProviderRequestPacingForTest();
+  }
 });

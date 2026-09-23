@@ -21,8 +21,8 @@ supported. Tests use a mock provider and no model credentials.
 
 Desktop versions start at **0.1.0** and are independent of OpenCodex's proxy version. The local
 desktop controls display both; the dashboard's existing version badge continues to show the proxy
-version. Maintainers update `desktop/package.json` and `desktop/src-tauri/Cargo.toml` together,
-then run `cargo check --offline --manifest-path desktop/src-tauri/Cargo.toml` to refresh the lockfile.
+version. Maintainers update `desktop-fork/package.json` and `desktop-fork/src-tauri/Cargo.toml` together,
+then run `cargo check --offline --manifest-path desktop-fork/src-tauri/Cargo.toml` to refresh the lockfile.
 Builds reject inconsistent desktop versions or resources from a different build.
 
 If you installed the earlier Windows test package numbered **2.50.0**, exit and uninstall it
@@ -34,7 +34,7 @@ version line; the Windows downgrade protection remains enabled.
 Pushing a `desktop-v<version>` tag triggers the same three-platform build and then automatically
 publishes a [GitHub prerelease](https://github.com/cct124/opencodex-desktop/releases). Ordinary branch
 pushes only produce test artifacts. Before tagging, update the desktop package, Cargo version and
-lockfile together, add `desktop/releases/<version>.md`, and commit and push those changes.
+lockfile together, add `desktop-fork/releases/<version>.md`, and commit and push those changes.
 For the current 0.1.1 version, tag the intended commit containing the publishing workflow:
 
 ```sh
@@ -75,14 +75,14 @@ signature, without Apple Developer ID signing or notarization; macOS may block t
 and require explicit approval in Privacy & Security. See [Tauri's signing guide](https://v2.tauri.app/distribute/sign/macos/).
 The package includes the native Bun executable and production dependencies. Build on the target
 architecture with Rust 1.92.0, Xcode Command Line Tools, and the repository's pinned Bun version.
-After frozen dependency installation and `cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml`,
-run `bun run desktop/scripts/build-installer.ts`. The installers and checksums are collected under
-`desktop/.bundle/artifacts/`.
+After frozen dependency installation and `cargo fetch --locked --manifest-path desktop-fork/src-tauri/Cargo.toml`,
+run `bun run desktop-fork/scripts/build-installer.ts`. The installers and checksums are collected under
+`desktop-fork/.bundle/artifacts/`.
 
 ## Start and connect
 
 Launch OpenCodex Desktop from the Start menu. For source development, use the built
-`desktop/src-tauri/target/debug/opencodex-desktop.exe`. Settings persist under
+`desktop-fork/src-tauri/target/debug/opencodex-desktop.exe`. Settings persist under
 `%LOCALAPPDATA%/me.opencodex.desktop/`. Closing the window keeps the proxy in the tray.
 On Mac, launch from Applications; data lives under `~/Library/Application Support/me.opencodex.desktop/`.
 Open the tray's desktop controls, configure providers, and explicitly enable the Codex connection.
@@ -118,7 +118,7 @@ is unchanged. Provider keys in the configuration are copied, but OAuth account s
 definitions, PID records and native recovery journals are not imported. Environment references
 remain references and are not converted into stored credentials.
 
-`desktop/dev.ps1` uses `--preview` for disposable, isolated development sessions. Exit an existing
+`desktop-fork/dev.ps1` uses `--preview` for disposable, isolated development sessions. Exit an existing
 instance before switching between preview and persistent modes.
 
 Native Codex requests in persistent desktop mode use HTTPS/SSE with the existing upstream

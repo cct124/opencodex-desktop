@@ -1,5 +1,10 @@
 # Claude Desktop Integration
 
+Native result continuations and function-result injection follow [the mode-specific result and control contract](../transports/streaming-health.md#experimental-native-function-result-injection); this surface does not infer upstream support or alter its defaults.
+Explicit Codex CLI installation observation does not launch or reconfigure a desktop client. See the [read-only observation contract](../runtime.md#explicit-codex-cli-installation-observation).
+
+Native steering follows [the shared WebSocket contract](../transports/streaming-health.md#experimental-native-mid-turn-steering); this surface's defaults remain unchanged.
+
 Desktop callers retain their existing ingress through the Responses
 [core module ownership](../transports/responses.md#core-module-ownership). This surface retains its existing behavior.
 
@@ -10,6 +15,7 @@ Codex-native model discovery follows the [shared retirement policy](../catalog.m
 That projection does not migrate existing user-selected Desktop configuration or usage history.
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](../transports/responses.md#passthrough-sse-stream-shapes-314).
+Translated Anthropic first-frame usage follows the [runtime snapshot contract](../runtime.md#anthropic-streaming-usage-snapshots); Desktop profile state and usage-ledger ownership are unchanged.
 
 Claude-only connections keep their existing non-failing readiness policy; displayed catalog reasons follow the [terminal rendering contract](../runtime.md#cli-readiness-diagnostics) whether they surface at connect time or on a later refresh.
 
@@ -18,6 +24,65 @@ The hub-side CLI dashboard uses the [management ingress address](../runtime.md#h
 Native main reauthentication follows the [CLI JSON output contract](../runtime.md#native-main-reauth-json-output).
 
 The Codex restart command follows the [CLI restart scope contract](../runtime.md#cli-codex-restart-scope).
+
+Native OpenAI pool routing also accepts
+[Orca-linked accounts](../codex-home.md#orca-source-owned-account-import), whose source resolution
+belongs to the shared account store. The import CLI adds pool rows independently of Desktop profiles.
+
+## Desktop modes: first-party and gateway
+
+`src/claude/desktop-first-party.ts` owns the Desktop mode contract. Two modes exist and are
+mutually exclusive on one machine:
+
+- **first-party** (default): Claude Desktop itself is left on claude.ai — login, Chat tab,
+  connectors and remote control are untouched and no config-library profile is written. The apply
+  writes only `HTTPS_PROXY=http://127.0.0.1:<port+100>` and `NODE_EXTRA_CA_CERTS=<config>/claude-intercept/ca.pem`
+  into the `env` block of Claude Code's `settings.json` (via `src/claude/intercept/settings.ts`),
+  creating the local authority first. Only the Claude Code process Desktop spawns for the Code tab
+  (and its subagents, and any standalone `claude` CLI) reads that env, so only their
+  `api.anthropic.com` traffic reaches the [Claude intercept pair](../runtime.md#claude-intercept-pair).
+- **gateway**: the existing third-party profile written by `src/claude/desktop-3p.ts`; the whole
+  app switches to the local gateway. It is selected explicitly (`--gateway`, dashboard, or the
+  legacy `--static|--hybrid|--discovery-only` shape flags, which imply it).
+
+`resolveClaudeDesktopMode` returns the explicit `claudeCode.desktopMode` when set; otherwise a
+persisted `desktopProfile.appliedFingerprint` (an existing gateway install) keeps `gateway`, and a
+fresh install resolves to `first-party`. Updates therefore never flip a working gateway install
+silently, while new installs land on first-party. `resolveClaudeDesktopApplyMode` narrows an
+*implied* first-party to gateway where the intercept pair cannot run (client role or
+`claudeCode.intercept.enabled: false`); an explicit `first-party` is refused with
+`intercept_disabled` instead of being rewritten.
+
+Mode switches establish the replacement before removing the previous connection. A failed
+first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
+the gateway; a failed gateway apply preserves the first-party env. After a successful first-party
+write, `removeDesktop3pStandardPivot({ replaceWhileEnabled: true })` retires the owned gateway.
+A refused pivot that has not changed Desktop rolls back only the managed env keys while they still match this apply;
+unrelated settings survive, and rollback failure is reported explicitly. If Desktop already pivoted to standard but credential cleanup is incomplete, first-party stays active and its mode is recorded. After a successful gateway
+write, only env values anchored on OpenCodex's CA path are removed. The committed gateway mode and profile fingerprint are persisted together before first-party
+cleanup via `src/claude/desktop-gateway-state.ts`. Cleanup failure remains a partial failure, while
+subsequent default applies and status retain the gateway choice. A separate persistence failure
+is reported explicitly; its mode/profile snapshot is not claimed to have been saved. These file operations are ordered,
+not a crash-atomic transaction across the settings file and Desktop library.
+Disabling the integration (native toggle, `ocx ensure` with the durable switch OFF) removes both the
+gateway profile and the first-party env. With the switch ON in first-party mode, `ocx ensure`
+re-applies a stale env (the proxy port follows the public port).
+
+Surfaces: `ocx claude desktop apply [--first-party|--gateway]` in `src/cli/claude-desktop.ts`;
+`POST /api/claude-desktop/apply` with `mode` ∈ `first-party|gateway|static|hybrid|discovery` and
+`GET /api/claude-desktop/status` (`mode`, `firstParty.{applied,stale,interceptEnabled,interceptRunning,proxyPort,caCertPath}`)
+in `src/server/management/agent-settings-routes.ts`; the native toggle in
+`src/server/management/native-integration-routes.ts` applies the resolved mode on enable. Managed
+Windows policy health only applies in gateway mode, because first-party never touches Desktop's own
+configuration. Ordinary Chat-tab traffic is out of scope for both modes.
+
+`src/claude/desktop-gateway-state.ts` adopts the exact committed Claude subtree and rebases the live hand-edit guard only after persistence succeeds. Pending disjoint live edits survive; later hand edits remain protected during unrelated whole-config saves. Gateway mode and fingerprint are recorded before cleanup and diagnostic awaits.
+
+Production apply and status routes use the asynchronous, read-only policy probe in
+`src/claude/desktop-policy.ts`. Concurrent requests share one in-flight probe, and its
+settled state is cached for 30 seconds. Each registry query is bounded to two seconds;
+timeouts and unreadable results report unknown policy state without blocking the server
+event loop. Injected probes may return a state or a promise, so isolated callers can exercise the same asynchronous boundary.
 
 ## Connected Claude Desktop profiles
 
@@ -97,6 +162,10 @@ The shared Responses path follows the [bounded multipart recovery contract](../s
 Connected `ocx status` diagnostics follow the shared
 [status credential binding](../runtime.md#remote-hub-status-credential-binding).
 
+The smaller `_remoteHub` annotation from `src/cli/config-command.ts` is intentionally independent
+of Desktop recovery and catalog readiness. It observes only the validated client record and local
+data-token ownership, so displaying configuration cannot enter Desktop or client lifecycle work.
+
 ## Claude Desktop config-library resolution
 
 The Desktop profile writer and the management status probe share
@@ -132,7 +201,7 @@ Desktop requests routed to the Codex pool use the shared [automatic plan exclusi
 The management quota DTO keeps Combo editing aligned with scoped inference evidence;
 see [Combo editor routing quota](../gui-and-management-api.md#combo-editor-routing-quota).
 
-Codex pool settings and their consumers follow the [reset-first ordering contract](../providers/openai-tiers.md#reset-first-account-ordering), including independent-quota fallback and preserved affinity.
+Codex pool settings and their consumers follow the [reset-first ordering contract](../providers/openai-tiers.md#reset-first-account-ordering), including independent-quota fallback, preserved affinity, strategy-specific threshold summaries, and shared short-observation freshness for switch warnings.
 
 Optional Codex transport-hint suppression is scoped to canonical Responses client output;
 its defaults and exclusions are owned by [Responses transport](../transports/responses.md).
@@ -170,3 +239,11 @@ Exact [model input declarations](../config.md#explicit-per-model-capability-decl
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](../transports/byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
+
+Native steering retains fixed phase deadlines and reconciled replay output; see the [steering stability contract](../transports/streaming-health.md#steering-deadlines-and-replay-completeness).
+
+Native steering generation overrides, explicit public-API eligibility and the consent-gated wire probe follow the [shared control contract](../transports/streaming-health.md#steering-settings-public-api-and-diagnostic-probe); this owner does not change routing or execute diagnostic tools.
+
+Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).
+
+The [compaction routing override](../transports/responses.md#compaction-routing-overrides) is scoped to Codex Responses metadata and original Responses ingress; Claude Messages replay retains its own routing.

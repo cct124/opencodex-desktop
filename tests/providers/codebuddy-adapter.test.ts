@@ -15,6 +15,7 @@ const enc = new TextEncoder();
 beforeEach(() => clearCodeBuddyBinaryCache());
 
 interface FakeChild extends EventEmitter {
+  pid?: number;
   stdout: Readable;
   stderr: Readable;
   stdin: Writable;
@@ -251,6 +252,60 @@ describe("codebuddy runTurn streams a headless turn", () => {
     expect(JSON.stringify(events)).not.toContain("secret-command");
   });
 
+  test("the projected history ceiling follows the model context window", async () => {
+    const stdout = [
+      enc.encode('{"type":"system","subtype":"init"}\n'),
+      enc.encode('{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":7,"output_tokens":2}}\n'),
+    ];
+    const history = Array.from({ length: 5 }, (_, index) => ({
+      role: "user" as const,
+      content: "EARLY-MARKER-" + String(index) + " " + "a".repeat(50_000),
+      timestamp: index,
+    }));
+    const messages = [...history, { role: "user", content: "final request", timestamp: 5 }];
+
+    const wide = fakeChild(stdout);
+    const wideAdapter = createCodeBuddyAdapter(
+      provider({ modelContextWindows: { "glm-5.3": 1_000_000 } }),
+      { spawn: () => wide as unknown as ChildProcess, which: () => "/usr/bin/codebuddy", killGraceMs: 20 },
+    );
+    await run(wideAdapter, parsed({ context: { messages } }));
+    expect(wide.written.join("")).toContain("EARLY-MARKER-0");
+    expect(wide.written.join("")).not.toContain("truncated for length");
+
+    const flat = fakeChild(stdout);
+    const flatAdapter = createCodeBuddyAdapter(
+      provider(),
+      { spawn: () => flat as unknown as ChildProcess, which: () => "/usr/bin/codebuddy", killGraceMs: 20 },
+    );
+    await run(flatAdapter, parsed({ context: { messages } }));
+    expect(flat.written.join("")).not.toContain("EARLY-MARKER-0");
+    expect(flat.written.join("")).toContain("truncated for length");
+  });
+
+  test.each(["Bash", "exec", "shell", "apply_patch"])("refuses a bare %s DSML invoke", name => {
+    const events: AdapterEvent[] = [];
+    const guarded = guardCodeBuddyScaffolding(event => events.push(event));
+
+    guarded({
+      type: "text_delta",
+      text: `<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="${name}">private-body`,
+    });
+
+    expect(events).toEqual([expect.objectContaining({ type: "error", code: "vendor_scaffold_detected" })]);
+  });
+
+  test("holds a bare invoke prefix split across deltas until its name arrives", () => {
+    const events: AdapterEvent[] = [];
+    const guarded = guardCodeBuddyScaffolding(event => events.push(event));
+
+    guarded({ type: "text_delta", text: "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"" });
+    expect(events).toEqual([]);
+    guarded({ type: "text_delta", text: "Bash\">private-body" });
+
+    expect(events).toEqual([expect.objectContaining({ type: "error", code: "vendor_scaffold_detected" })]);
+  });
+
   test("detects a DSML control sequence split across streamed text deltas", async () => {
     const frame = (text: string) => `${JSON.stringify({
       type: "stream_event",
@@ -327,9 +382,9 @@ describe("codebuddy runTurn streams a headless turn", () => {
     const events: AdapterEvent[] = [];
     const guarded = guardCodeBuddyScaffolding(event => events.push(event));
     const answer = "\"<｜｜DSML｜｜ calls>\"\n"
-      + "\"<｜｜DSML｜｜ invoke name=\\\"functions.exec\\\">\"\n"
+      + "\"<｜｜DSML｜｜ invoke name=\\\"Bash\\\">\"\n"
       + "Use `<｜｜DSML｜｜ calls>` when discussing the literal.\n"
-      + "> <｜｜DSML｜｜ calls>\n> <｜｜DSML｜｜ invoke name=\"functions.exec\">";
+      + "> <｜｜DSML｜｜ calls>\n> <｜｜DSML｜｜ invoke name=\"exec\">";
 
     guarded({ type: "text_delta", text: answer });
     guarded({ type: "done", stopReason: "stop" });
@@ -344,7 +399,7 @@ describe("codebuddy runTurn streams a headless turn", () => {
     const events: AdapterEvent[] = [];
     const guarded = guardCodeBuddyScaffolding(event => events.push(event));
     const first = "```text\n<｜｜DSML｜｜ calls>\n";
-    const second = "<｜｜DSML｜｜ invoke name=\"functions.exec\">\n```";
+    const second = "<｜｜DSML｜｜ invoke name=\"Bash\">\n```";
 
     guarded({ type: "text_delta", text: first });
     guarded({ type: "text_delta", text: second });
@@ -396,6 +451,20 @@ describe("codebuddy runTurn streams a headless turn", () => {
 
     expect(events).toEqual([
       { type: "text_delta", text: "<｜｜DSML｜｜ calls>" },
+      { type: "done", stopReason: "stop" },
+    ]);
+  });
+
+  test("delivers a calls block whose invoke name is empty", () => {
+    const events: AdapterEvent[] = [];
+    const guarded = guardCodeBuddyScaffolding(event => events.push(event));
+    const answer = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"\">";
+
+    guarded({ type: "text_delta", text: answer });
+    guarded({ type: "done", stopReason: "stop" });
+
+    expect(events).toEqual([
+      { type: "text_delta", text: answer },
       { type: "done", stopReason: "stop" },
     ]);
   });
@@ -577,8 +646,80 @@ describe("codebuddy runTurn streams a headless turn", () => {
     expect(events.some(e => e.type === "done")).toBe(false);
   });
 
+  test("a Windows abort terminates the cmd shim process tree", async () => {
+    const controller = new AbortController();
+    const stdoutStream = new Readable({
+      read() { setTimeout(() => controller.abort(), 5); },
+    });
+    const child = new EventEmitter() as FakeChild;
+    child.pid = 4242;
+    child.stdout = stdoutStream;
+    child.stderr = Readable.from([]);
+    child.written = [];
+    child.stdin = new Writable({ write(_c, _e, cb) { cb(); } });
+    child.killed = false;
+    child.exitCode = null;
+    const directSignals: string[] = [];
+    child.kill = signal => { directSignals.push(signal ?? "SIGTERM"); return true; };
+    const killedTrees: number[] = [];
+
+    const adapter = createCodeBuddyAdapter(provider(), {
+      platform: "win32",
+      spawn: () => child as unknown as ChildProcess,
+      which: () => "C:\\npm\\codebuddy.cmd",
+      killWindowsProcessTree: pid => {
+        killedTrees.push(pid);
+        child.exitCode = 1;
+        child.emit("close", 1);
+      },
+      killGraceMs: 20,
+    });
+    const events = await run(adapter, parsed(), incoming(controller.signal));
+
+    expect(killedTrees).toEqual([4242]);
+    expect(directSignals).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "error", retryable: false }));
+  });
+
   test("a timeout destroys a stalled stdout stream and returns even when close never arrives", async () => {
+    type TimingPhase = "entry" | "spawn" | "sigterm" | "stdout_close" | "stdout_error" | "timeout" | "return";
+    type TimingClassification =
+      | "within_budget"
+      | "pre_spawn_late"
+      | "timeout_dispatch_missing"
+      | "timeout_dispatch_late"
+      | "timeout_event_missing"
+      | "stdout_settlement_missing"
+      | "stdout_settlement_late"
+      | "reap_or_return_late";
+    const phaseOrder: readonly TimingPhase[] = [
+      "entry", "spawn", "sigterm", "stdout_close", "stdout_error", "timeout", "return",
+    ];
+    const phaseMs: Partial<Record<TimingPhase, number>> = {};
+    let startedAt = 0;
+    const boundedElapsed = (): number => Math.min(1_000, Math.max(0, Date.now() - startedAt));
+    const mark = (phase: TimingPhase): void => { phaseMs[phase] ??= boundedElapsed(); };
+    const classify = (elapsed: number): TimingClassification => {
+      if (elapsed < 250) return "within_budget";
+      if ((phaseMs.spawn ?? 0) >= 250) return "pre_spawn_late";
+      if (phaseMs.sigterm === undefined) return "timeout_dispatch_missing";
+      if (phaseMs.sigterm >= 250) return "timeout_dispatch_late";
+      if (phaseMs.timeout === undefined) return "timeout_event_missing";
+      const streamSettledAt = Math.min(
+        phaseMs.stdout_close ?? Number.POSITIVE_INFINITY,
+        phaseMs.stdout_error ?? Number.POSITIVE_INFINITY,
+      );
+      if (!Number.isFinite(streamSettledAt)) return "stdout_settlement_missing";
+      if (streamSettledAt >= 250) return "stdout_settlement_late";
+      return "reap_or_return_late";
+    };
+    const diagnostic = (elapsed: number): string => {
+      const phases = phaseOrder.map(phase => `${phase}_ms=${phaseMs[phase] ?? -1}`).join(",");
+      return `codebuddy_timeout_timing classification=${classify(elapsed)} total_ms=${elapsed} ${phases}`;
+    };
     const stdoutStream = new Readable({ read() { /* stays open until timeout destroys it */ } });
+    stdoutStream.once("close", () => mark("stdout_close"));
+    stdoutStream.once("error", () => mark("stdout_error"));
     const child = new EventEmitter() as FakeChild;
     child.stdout = stdoutStream;
     child.stderr = Readable.from([]);
@@ -588,22 +729,34 @@ describe("codebuddy runTurn streams a headless turn", () => {
     child.exitCode = null;
     const signals: string[] = [];
     child.kill = (sig?: string) => {
+      if ((sig ?? "SIGTERM") === "SIGTERM") mark("sigterm");
       child.killed = true;
       signals.push(sig ?? "SIGTERM");
       return true;
     };
 
     const adapter = createCodeBuddyAdapter(provider(), {
-      spawn: () => child as unknown as ChildProcess,
+      spawn: () => {
+        mark("spawn");
+        return child as unknown as ChildProcess;
+      },
       which: () => "/usr/bin/codebuddy",
       timeoutMs: 10,
       killGraceMs: 10,
       reapTimeoutMs: 35,
     });
-    const startedAt = Date.now();
-    const events = await run(adapter, parsed());
+    startedAt = Date.now();
+    mark("entry");
+    const events: AdapterEvent[] = [];
+    await adapter.runTurn!(parsed(), incoming(), event => {
+      if (event.type === "error" && event.status === 504 && event.code === "timeout") mark("timeout");
+      events.push(event);
+    });
+    mark("return");
+    // The measured assertion uses the raw elapsed time; clamping would hide a genuine overrun.
+    const elapsed = Date.now() - startedAt;
 
-    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(elapsed, diagnostic(elapsed)).toBeLessThan(250);
     expect(stdoutStream.destroyed).toBe(true);
     expect(signals).toContain("SIGTERM");
     expect(events).toContainEqual(expect.objectContaining({ type: "error", status: 504, code: "timeout" }));

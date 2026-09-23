@@ -1,11 +1,16 @@
 {
-  "name": "opencodex-desktop-build",
-  "version": "0.1.3",
+  "name": "@opencodex/desktop",
   "private": true,
-  "type": "module",
   "scripts": {
-    "stage": "bun scripts/stage-runtime.ts",
-    "package": "bun scripts/build-installer.ts"
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:local": "bun scripts/build-local.ts",
+    "icons": "bun scripts/generate-icons.ts",
+    "icons:check": "bun scripts/generate-icons.ts --check",
+    "prepare-sidecar": "bun scripts/prepare-sidecar.ts",
+    "prepare-widget": "bash scripts/build-widget.sh"
   },
-  "devDependencies": { "@tauri-apps/cli": "2.11.2" }
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.1"
+  }
 }

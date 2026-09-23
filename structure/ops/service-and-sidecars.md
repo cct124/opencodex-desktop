@@ -1,5 +1,9 @@
 # Background Service And Sidecars
 
+Native result continuations and function-result injection follow [the mode-specific result and control contract](../transports/streaming-health.md#experimental-native-function-result-injection); this surface does not infer upstream support or alter its defaults.
+
+Native steering follows [the shared WebSocket contract](../transports/streaming-health.md#experimental-native-mid-turn-steering); this surface's defaults remain unchanged.
+
 Service endpoints are unchanged by the Responses
 [core module ownership](../transports/responses.md#core-module-ownership). This surface retains its existing behavior.
 
@@ -184,3 +188,18 @@ The [explicit model-capability contract](../config.md#explicit-per-model-capabil
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](../transports/byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
+
+Native steering retains fixed phase deadlines and reconciled replay output; see the [steering stability contract](../transports/streaming-health.md#steering-deadlines-and-replay-completeness).
+
+Native steering generation overrides, explicit public-API eligibility and the consent-gated wire probe follow the [shared control contract](../transports/streaming-health.md#steering-settings-public-api-and-diagnostic-probe); this owner does not change routing or execute diagnostic tools.
+
+Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).
+
+The service loads the optional `compactionRouting` block from persisted configuration.
+[Responses ingress](../transports/responses.md#compaction-routing-overrides) applies it to individual compaction
+requests whose trigger the block names.
+
+Standalone binaries use `src/lib/standalone.ts` to detect the Bun `$bunfs` runtime and
+`src/service/state.ts` to compose durable service commands as `<execPath> start`, without a
+source-tree CLI path. The copied `gui/dist` directory is located by `src/server/gui-static.ts`;
+`OPENCODEX_GUI_DIST` remains an explicit override.

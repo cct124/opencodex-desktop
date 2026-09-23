@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, saveConfig } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { flushNativeMainStartupReleases } from "../../src/codex/native-profile-startup";
 import { clearContextSessionOwnersForTests } from "../../src/codex/context-owner";
 import { resetContextRelayActivationForTests } from "../../src/codex/context-compat";
 import { startServer } from "../../src/server";
@@ -30,6 +31,7 @@ import {
   setPlatformForTests,
   timedOutSecretPathCountForTests,
   hardenSecretDir,
+  flushWindowsSecretAclReapsBeforeRemoval,
 } from "../../src/lib/windows-secret-acl";
 import {
   LOCAL_ATTESTATION_CHALLENGE_HEADER,
@@ -191,22 +193,16 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Settle every in-flight config-directory harden before anything here removes a directory.
-  //
-  // `hardenConfigDir()` spawns `icacls.exe`, which holds the directory open until it exits, and
-  // Windows file locking is mandatory: removing that tree while the child lives returns EPERM no
-  // matter how long the caller waits. Windows shard 1/6 of run 35108652486 proved the waiting is
-  // not the answer -- it exhausted the full 15s exponential budget and still threw
-  // `EPERM: operation not permitted, rm .../tmp/ocx-management-auth-fDchUb` out of this hook.
-  // #4789 filed the same failure at this same line when the budget was 2.5s, and raising it to
-  // 15s in #4796 bought six times the wait and changed nothing, because the handle was never
-  // going to close on its own schedule. The process that started the child has to wait for it.
-  //
-  // The all-directories variant is the required one. `server.stop` already flushes, but through
-  // `flushConfigDirHardening()`, which defaults to `getConfigDir()` read at stop time -- and this
-  // hook moves OPENCODEX_HOME back to the developer's real home a few lines below, so a
-  // directory-scoped flush here would settle the wrong tree and leave this one held.
+  // Drain producers before the final handle-release barrier. Native-main
+  // release can finish ACL-backed startup work under CODEX_HOME and register
+  // another child reap; waiting for reaps before that release misses the child.
+  await flushNativeMainStartupReleases();
+  // Flush all homes before restoring environment variables, including startup
+  // rollback flights that no successfully returned server could have awaited.
   await flushConfigDirHardeningForTests();
+  // The caller-facing ACL timeout may settle before icacls actually exits.
+  // Deletion waits for actual reaps, after every producer above has settled.
+  await flushWindowsSecretAclReapsBeforeRemoval(testHome);
   resetContextRelayActivationForTests();
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
@@ -1778,13 +1774,17 @@ describe("management and data-plane credential separation", () => {
     saveConfig(remoteConfig());
     process.env.USERNAME ??= "tester";
     setPlatformForTests("win32");
-    // Env-token init never needs file ACL. Time out management-token paths so a
-    // broken file-backed ACL cannot be what made management available; allow
-    // other file hardens so startServer → saveConfig works on real win32
-    // (config-mutation directory harden soft-fails home timeouts).
+    // Env-token init never needs file ACL. Time out the management TOKEN FILE so a broken
+    // file-backed ACL cannot be what made management available; the assertion that the state's
+    // source is "environment" is what proves which path answered.
+    //
+    // The state directory itself is no longer timed out. It was never load-bearing for this
+    // claim, and it is hardened with required: true by the spend-journal owner during
+    // startServer, which correctly refuses rather than soft-failing: an unverified ACL on the
+    // directory holding a secret is not something to proceed past.
     setIcaclsRunnerForTests(args => {
       const target = args[0] ?? "";
-      if (target === testHome || target.endsWith("admin-api-token")) {
+      if (target.endsWith("admin-api-token")) {
         return { success: false, exitCode: null, timedOut: true, stdout: "" };
       }
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };

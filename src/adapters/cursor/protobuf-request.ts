@@ -6,6 +6,7 @@ import { namespacedToolName } from "../../types";
 import type { CursorRunRequest } from "./types";
 import { decodeCursorCallId } from "./call-id";
 import { cursorNeedsExternalToolContinuation, isCursorExternalWireModel } from "./discovery";
+import { stripAssistantEchoedToolEnvelope } from "./envelope-echo";
 import { normalizeCursorToolResultText } from "./tool-result-normalize";
 import { debugProviderDiagnostic } from "../../lib/debug";
 import {
@@ -75,6 +76,8 @@ export const CURSOR_ROUTING_LEVEL_PARAMETER_ID = "optimization";
 export const CURSOR_EXTERNAL_ROOT_BLOB_LIMIT = 192;
 /** Approximate prompt-size guard; tool schemas and protocol framing consume context separately. */
 export const CURSOR_EXTERNAL_ROOT_BYTE_LIMIT = 512 * 1024;
+/** Honest placeholder when native Composer history has a toolCall with no matching toolResult. */
+export const CURSOR_MISSING_TOOL_RESULT = "[missing tool_result for this tool_use in history]";
 /**
  * Byte budget for the serialized arguments named inside ONE replayed tool-result envelope. The
  * invocation identifies the call; the result is the payload. Without an independent cap, a single
@@ -206,11 +209,13 @@ function assistantRootText(
   message: Extract<OcxMessage, { role: "assistant" }>,
   includeThinking: boolean,
 ): string {
-  if (typeof message.content === "string") return message.content;
-  return message.content
-    .map(part => (part.type === "text" ? part.text : includeThinking && part.type === "thinking" ? part.thinking : undefined))
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .join("\n");
+  const raw = typeof message.content === "string"
+    ? message.content
+    : message.content
+      .map(part => (part.type === "text" ? part.text : includeThinking && part.type === "thinking" ? part.thinking : undefined))
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .join("\n");
+  return stripAssistantEchoedToolEnvelope(raw);
 }
 
 // Cursor builds the actual model prompt from rootPromptMessagesJson (turns[] is UI/display metadata),
@@ -306,6 +311,7 @@ function rootPromptMessages(
   const replayRuns = new Map<RootBlobCandidate["role"], {
     text: string;
     entry: RootBlobCandidate;
+    entryIndex: number;
     length: number;
   }>();
   const toolCallCounts = new Map<string, number>();
@@ -332,13 +338,13 @@ function rootPromptMessages(
         // half, so losing it re-primes the self-reinforcing loop the breaker exists to end.
         { ...opts, text: marked, messageIndex: previous.entry.messageIndex ?? opts.messageIndex },
       );
-      entries[entries.indexOf(previous.entry)] = replacement;
-      replayRuns.set(role, { text: normalized, entry: replacement, length: runLength });
+      entries[previous.entryIndex] = replacement;
+      replayRuns.set(role, { text: normalized, entry: replacement, entryIndex: previous.entryIndex, length: runLength });
       return;
     }
     const entry = rootBlobCandidate(payload, role, opts);
     entries.push(entry);
-    replayRuns.set(role, { text: normalized, entry, length: 1 });
+    replayRuns.set(role, { text: normalized, entry, entryIndex: entries.length - 1, length: 1 });
   };
 
   for (let i = 0; i < messages.length; i++) {
@@ -736,7 +742,7 @@ function contentText(message: OcxMessage): string {
   if (typeof message.content === "string") return message.content;
   return message.content
     .map(part => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text" || part.type === "document") return part.text;
       if (part.type === "thinking") return part.thinking;
       if (part.type === "image") return undefined;
       return undefined;
@@ -749,7 +755,7 @@ function contentToText(content: OcxToolResultMessage["content"]): string {
   if (typeof content === "string") return content;
   return content
     .map(part => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text" || part.type === "document") return part.text;
       if (part.type === "image") return CURSOR_VISION_IMAGE_HISTORY_MARKER;
       return undefined;
     })
@@ -762,7 +768,7 @@ function historyContentText(message: OcxMessage): string {
   if (message.role === "toolResult" || typeof message.content === "string") return contentText(message);
   return message.content
     .map(part => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text" || part.type === "document") return part.text;
       if (part.type === "thinking") return part.thinking;
       if (part.type === "image") return CURSOR_VISION_IMAGE_HISTORY_MARKER;
       return undefined;
@@ -831,6 +837,9 @@ function decodeResultParts(message: OcxToolResultMessage): DecodedResultPart[] |
   return content.map((part): DecodedResultPart => {
     if (part.type === "text") return { kind: "text", text: part.text };
     if (part.type === "video") return { kind: "text", text: "[video]" };
+    // Without this the document falls through to decodeInlineImage(part.imageUrl) below and is
+    // treated as an image it is not.
+    if (part.type === "document") return { kind: "text", text: part.text };
     const decoded = decodeInlineImage(part.imageUrl);
     return decoded ? { kind: "image", ...decoded } : { kind: "undecodable" };
   });
@@ -941,11 +950,26 @@ function serializeToolCallArguments(args: Record<string, unknown>): string | und
 
 /** Truncate to a byte budget without splitting a UTF-8 sequence. */
 function truncateUtf8(text: string, maxBytes: number): string {
-  const encoded = encoder.encode(text);
-  if (encoded.byteLength <= maxBytes) return text;
-  let end = Math.max(0, maxBytes);
-  while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end -= 1;
-  return decoder.decode(encoded.subarray(0, end));
+  const encoded = new Uint8Array(Math.max(0, maxBytes));
+  const { read, written } = encoder.encodeInto(text, encoded);
+  return read === text.length ? text : decoder.decode(encoded.subarray(0, written));
+}
+
+/** Return the UTF-8 length only when it fits the bound, without allocating an input-sized buffer. */
+function boundedUtf8ByteLength(text: string, maxBytes: number): number | undefined {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length
+      && text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) {
+      bytes += 4;
+      i += 1;
+    } else bytes += 3;
+    if (bytes > maxBytes) return undefined;
+  }
+  return bytes;
 }
 
 /**
@@ -958,16 +982,19 @@ function truncateUtf8(text: string, maxBytes: number): string {
  * exists to prevent. A bounded prefix still identifies the call (tool name plus the head of its
  * arguments) while leaving the output room to survive.
  */
-function toolCallArgumentsText(args: Record<string, unknown>): string {
-  const serialized = serializeToolCallArguments(args);
-  if (serialized === undefined) return "[unserializable arguments]";
-  if (encoder.encode(serialized).byteLength <= CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT) return serialized;
+function serializedToolCallArgumentsText(serialized: string): string {
+  if (boundedUtf8ByteLength(serialized, CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT) !== undefined) return serialized;
   // The budget is the size of the RENDERED line, so the marker has to come out of it rather than be
   // added on top: otherwise every truncated invocation exceeds the declared limit by the marker.
   const marker = "…[arguments truncated]";
   const markerBytes = encoder.encode(marker).byteLength;
   const keep = Math.max(0, CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT - markerBytes);
   return `${truncateUtf8(serialized, keep)}${marker}`;
+}
+
+function toolCallArgumentsText(args: Record<string, unknown>): string {
+  const serialized = serializeToolCallArguments(args);
+  return serialized === undefined ? "[unserializable arguments]" : serializedToolCallArgumentsText(serialized);
 }
 
 /**
@@ -1044,8 +1071,15 @@ function restoreClippedInvocationArguments(
     if (!call) continue;
     const full = serializeToolCallArguments(call.arguments);
     if (full === undefined) continue;
-    const clipped = toolCallArgumentsText(call.arguments);
+    const clipped = serializedToolCallArgumentsText(full);
     if (clipped === full) continue;
+    // The replacement must add at least the raw UTF-8 argument-byte delta. Reject an impossible
+    // restoration with a bounded scan before building the widened string, JSON, and byte array.
+    const clippedBytes = encoder.encode(clipped).byteLength;
+    // boundedUtf8ByteLength already gives up past clippedBytes + spare, so a returned number
+    // always fits; a second size comparison here can never fire.
+    const fullBytes = boundedUtf8ByteLength(full, clippedBytes + spare);
+    if (fullBytes === undefined) continue;
     const name = namespacedToolName(call.namespace, call.name);
     // Anchored on the preceding newline. `toolResultToText` always emits the invocation after the
     // `[tool_result]`, `call_id:` and `name:` lines, so the real line is never first — and
@@ -1218,6 +1252,20 @@ function argBytes(value: unknown): Uint8Array {
   }
 }
 
+function missingToolResultFor(
+  part: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
+): OcxToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId: part.id,
+    toolName: part.name,
+    ...(part.namespace ? { toolNamespace: part.namespace } : {}),
+    content: CURSOR_MISSING_TOOL_RESULT,
+    isError: true,
+    timestamp: 0,
+  };
+}
+
 function toolCallStep(
   part: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
   requestScope: CursorBlobRequestScopeToken,
@@ -1332,7 +1380,9 @@ function conversationTurns(
   const pendingToolCalls = new Map<string, Extract<OcxAssistantContentPart, { type: "toolCall" }>>();
   const flush = () => {
     if (!current) return;
-    for (const part of pendingToolCalls.values()) current.steps.push(toolCallStep(part, requestScope));
+    for (const part of pendingToolCalls.values()) {
+      current.steps.push(toolCallStep(part, requestScope, missingToolResultFor(part), codeMode));
+    }
     turns.push(storeCursorBlob(toBinary(ConversationTurnStructureSchema, create(ConversationTurnStructureSchema, {
       turn: {
         case: "agentConversationTurn",

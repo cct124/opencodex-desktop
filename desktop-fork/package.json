@@ -1,0 +1,11 @@
+{
+  "name": "opencodex-desktop-build",
+  "version": "0.1.4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "stage": "bun scripts/stage-runtime.ts",
+    "package": "bun scripts/build-installer.ts"
+  },
+  "devDependencies": { "@tauri-apps/cli": "2.11.2" }
+}

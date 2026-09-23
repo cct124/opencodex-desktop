@@ -1,5 +1,23 @@
 # Compatibility Lab
 
+## Core isolation and synchronous activation
+
+The protected core request-path files carry no load-time import chain into Lab runtime code:
+the guard in `tests/lab/core-lab-boundary.test.ts` walks static imports, side-effect imports,
+and re-exports transitively from the guard-owned `PROTECTED` list and prints the offending
+chain on failure. A dynamic `import()` is a deferred edge the walk deliberately does not
+follow, because lazy loading behind a namespace or activation check is the sanctioned remedy —
+so the same guard separately forbids a protected file from naming Lab even in a direct dynamic
+import. The ordinary no-Lab path therefore executes no Lab code, while the management plane can
+still route `/api/lab` lazily through a non-Lab module without weakening the rule.
+
+`src/server/index.ts` is deliberately exempt as the composition root: Lab activation stays
+behind `labActivationRequired`, and the window from `Bun.serve` through the `startServer`
+return contains no suspension, so a policy route can never be evaluated before its evidence
+provider is registered and the subagent fallback chain keeps the operator-configured model.
+This contract is [INV-LAB-01](../overview.md#non-negotiable-invariants), bound to the same
+guard test.
+
 ## CL-03 live-route execution boundary
 
 CL-03 live-route evidence is generated only for an exact `RouteSubjectV1` and remains separate from protocol-conformance and task-effectiveness evidence.
@@ -42,16 +60,24 @@ before anything else: `dial tcp redis:6379` needs no further signal.
 
 Otherwise, **strong** markers (`ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`,
 `ETIMEDOUT`, `EHOSTUNREACH`, `dial tcp`, `host=`/`host:`) introduce a
-destination, and a resolver marker licenses even a bare name
-(`getaddrinfo ENOTFOUND redis`). The destination is not assumed adjacent — Go
-writes `dial tcp: lookup <host>: no such host` — so the following few tokens are
-scanned and the first host-shaped one is replaced. A plain English word is not
-host-shaped, so `ETIMEDOUT request after 30 seconds` is untouched.
+destination. The destination is not assumed adjacent — Go writes
+`dial tcp: lookup <host>: no such host` — so the following few tokens are
+scanned and the first host-shaped one is replaced. A bare name counts only in
+a position the grammar proves is the destination — directly after `ENOTFOUND`,
+`EAI_AGAIN`, or `host=`/`host:` even when explanatory prose follows, the marker's sole argument
+(`ECONNREFUSED redis`, `dial tcp redis`) or the argument of `lookup`
+(`dial tcp: lookup redis`). Connective prose after a marker survives:
+`ETIMEDOUT request after 30 seconds` and `ETIMEDOUT while waiting for
+response` are both untouched.
 
 **Weak** markers (`upstream`, `connect to`) read as English at least as often as
 they name a host, so they redact only a candidate that is already host-shaped
-and is not a plain dotted namespace. `upstream provider.metric.p95 exceeded` and
-`Unable to connect to your account` both survive.
+and is not a plain dotted namespace or the conventional `*.metric.p<digits>`
+form. `upstream provider.metric.p95 exceeded` and
+`Unable to connect to your account` both survive; `upstream db.prod1` does not.
+For `connect to`, an immediately following network failure term also makes a
+bare target unambiguous, so `connect to gateway failed` is redacted while
+`Unable to connect to your account` survives.
 
 ### Known limits
 
@@ -59,14 +85,14 @@ Recorded rather than implied, so a reader knows what is not covered:
 
 | Form | Behavior |
 |------|----------|
-| Bare service name after natural-language `connect to` with no port at all (`connect to gateway failed`) | not redacted — the phrase is prose too often to trust. A port in either notation (`gateway:443`, `gateway on port 443`) does make it a host |
 | Bare `db.prod-1` outside any network context | not redacted — indistinguishable from a metric namespace |
+| Bare word amid prose after a socket marker (`ETIMEDOUT operation timed out`) | not redacted — only the marker's sole argument or the word after `lookup` is a proven destination position |
 | Standalone UUID, standalone `user_…`, bare-label value (`org: engineering`) | not redacted — indistinguishable from request, trace, and correlation ids |
 | Phone numbers, generic high-entropy blobs | not redacted — no non-destructive pattern |
 | Cisco dotted MAC (`0123.4567.89ab`), ideographic-dot IDN | not redacted — unusual notations |
 | Escaped-quote mail local part | partially redacted; the address is broken but a fragment of the local part can remain |
 | Percent-encoding nested more than six deep | not decoded further |
-| Fully alphabetic dotted namespace (`provider.timeout`, `provider.request.duration`) | **over-redacted to `[host]`** — indistinguishable from a real hostname. A namespace whose last label carries a digit (`provider.metric.p95`) survives |
+| Fully alphabetic dotted namespace (`provider.timeout`, `provider.request.duration`) | **over-redacted to `[host]`** — indistinguishable from a real hostname. A digit-suffixed namespace survives bare (`release.v2`); after a weak marker only the conventional `*.metric.p<digits>` form does (`provider.metric.p95`) — `upstream db.prod1` and `upstream api.v2` redact |
 
 The marker behaviors and the redacted categories are asserted in both
 directions — positive cases for what must be removed, negative cases for the

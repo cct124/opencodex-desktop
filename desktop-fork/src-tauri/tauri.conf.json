@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenCodex Desktop",
+  "version": "../package.json",
+  "identifier": "me.opencodex.desktop",
+  "build": { "frontendDist": "../launcher" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "capabilities": [{ "identifier": "launcher", "windows": ["launcher"], "permissions": ["core:default"] }]
+    }
+  },
+  "bundle": { "active": false, "icon": ["../../gui/public/favicon.png"] }
+}

@@ -138,7 +138,8 @@ describe("resolveMatchedPrice", () => {
   // maintainer derived (5 / 25 / 0.5 / 6.25), so that provider is now sourced from jawcode
   // and reads `verified` instead of `verified-derived`. cursor and kiro have no jawcode row
   // of their own and still come from the overlay, which is why the overlay must stay.
-  // The price is identical either way — only the provenance moved, and it moved forward.
+  // The price is identical either way — only the provenance moved, and it moved forward:
+  // Anthropic's pricing page now lists Opus 5 itself (2026-09-23), so the overlay cites it.
   test("claude-opus-5 resolves to the Opus 4.6 price on every exposing provider", () => {
     const COST4 = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
 
@@ -161,10 +162,66 @@ describe("resolveMatchedPrice", () => {
         source: "expected",
         status: "verified-derived",
       });
-      // Provenance must stay honest: derived from the maintainer's confirmation,
-      // not from a published Opus 5 price page.
-      expect(price?.sourceRef).toContain("user-confirmed");
+      // Provenance must stay honest: the published Anthropic Opus 5 list price, applied to a
+      // reseller surface, so the row stays verified-derived.
+      expect(price?.sourceRef).toContain("anthropic official Claude Opus 5 ");
+      expect(price?.sourceRef).toContain("platform.claude.com/docs/en/about-claude/pricing");
     }
+  });
+
+  // Claude Opus 5.5 (2026-09-22): 4 / 20 / 5.00 cache write, and a 0.05x cache-hit rate (0.20)
+  // rather than the 0.1x Opus 5 uses. Live discovery listed the id before any price row existed,
+  // so every surface below rendered a blank cost.
+  test("claude-opus-5-5 resolves to the official Opus 5.5 price on every exposing surface", () => {
+    const COST4 = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 };
+    for (const provider of ["anthropic", "anthropic-apikey"]) {
+      expect(resolveMatchedPrice(provider, "claude-opus-5-5"), provider).toMatchObject({
+        provider,
+        modelId: "claude-opus-5-5",
+        cost4: COST4,
+        source: "jawcode",
+        jawcodeProvider: "anthropic",
+        status: "verified",
+      });
+    }
+    expect(resolveMatchedPrice("anthropic-pb51d9b", "claude-opus-5-5")?.cost4).toEqual(COST4);
+    // Claude Code's native passthrough logs the dotted spelling under its own label; the
+    // model-level vendor fallback normalizes it onto the Anthropic row.
+    expect(resolveMatchedPrice("anthropic-native", "claude-opus-5.5")).toMatchObject({
+      cost4: COST4,
+      jawcodeProvider: "anthropic",
+      status: "verified-derived",
+    });
+    // Cursor publishes the same list rate; every variant spelling collapses onto one row.
+    for (const spelling of ["claude-opus-5-5", "claude-opus-5-5-thinking-high", "claude-opus-5-5-thinking-high-fast"]) {
+      expect(resolveMatchedPrice("cursor", spelling), spelling).toMatchObject({
+        cost4: COST4,
+        source: "expected",
+        status: "verified",
+      });
+    }
+    for (const provider of ["devin", "devin-cli"]) {
+      expect(resolveMatchedPrice(provider, "claude-opus-5-5"), provider).toMatchObject({
+        cost4: COST4,
+        source: "expected",
+        status: "verified-derived",
+      });
+    }
+    // Aggregators spell it with a dot; their bundled rows carry the same list rate.
+    expect(resolveMatchedPrice("openrouter", "anthropic/claude-opus-5.5")?.cost4).toEqual(COST4);
+    // Live-only or pooled providers with no bundle row of their own follow the vendor price.
+    for (const provider of ["command-code", "opper", "github-copilot"]) {
+      expect(resolveMatchedPrice(provider, "claude-opus-5-5"), provider).toMatchObject({
+        cost4: COST4,
+        jawcodeProvider: "anthropic",
+        status: "verified-derived",
+      });
+    }
+    // Preemptive rows (260923, ahead of the provider): Kiro's dotted id falls back onto the base
+    // Anthropic row, never a marked-up regional Bedrock row; the fast tiers carry the 2x rate.
+    expect(resolveMatchedPrice("kiro", "claude-opus-5.5")).toMatchObject({ cost4: COST4, jawcodeProvider: "anthropic" });
+    expect(resolveMatchedPrice("openrouter", "anthropic/claude-opus-5.5-fast")?.cost4)
+      .toEqual({ input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 });
   });
 
   test("17. model-level fallback: kiro's claude opus follows the anthropic price", () => {
@@ -258,6 +315,36 @@ describe("resolveMatchedPrice", () => {
     }
   });
 
+  // OpenCode Go serves five ids with no jawcode bundle row and no vendor-level
+  // fallback, so every request through them resolved to null and the Usage cost
+  // column rendered an em dash. Each row reuses the vendor's published list price
+  // as a verified-derived estimate (Go itself is subscription-billed).
+  test("17h. OpenCode Go ids resolve vendor list prices as estimates", () => {
+    for (const [modelId, cost4] of [
+      ["qwen3.8-max", { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 }],
+      ["qwen3.8-flash", { input: 0.16, output: 0.47, cacheRead: 0, cacheWrite: 0 }],
+      ["deepseek-v4.1-flash", { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 }],
+      ["glm-5.3-flash", { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 }],
+      ["muse-spark-1.3-contributor", { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 }],
+    ] as const) {
+      const price = resolveMatchedPrice("opencode-go", modelId);
+      expect(price, `opencode-go/${modelId}`).toMatchObject({ cost4, source: "expected", status: "verified-derived" });
+    }
+    // The Flash rows must keep carrying what the vendor figure does NOT cover:
+    // Qwen publishes no cache rate, DeepSeek's off-peak window is not baked in.
+    expect(resolveMatchedPrice("opencode-go", "qwen3.8-flash")?.sourceRef).toContain("cache rates unpublished");
+    expect(resolveMatchedPrice("opencode-go", "deepseek-v4.1-flash")?.sourceRef).toContain("off-peak");
+    // End to end: a real request through a previously unpriced id now estimates
+    // instead of resolving to null.
+    const estimate = estimateRequestCost({
+      provider: "opencode-go",
+      model: "qwen3.8-flash",
+      usage: { inputTokens: 1700, outputTokens: 0 },
+      usageStatus: "estimated",
+    });
+    expect(estimate?.cost.total).toBeCloseTo(1700 * 0.16 / 1e6, 12);
+  });
+
   test("6. unmatched exact key is null", () => {
     expect(resolveMatchedPrice("no-such-provider", "no-such-model")).toBeNull();
     expect(resolveMatchedPrice("openai", "definitely-not-a-model")).toBeNull();
@@ -298,8 +385,8 @@ describe("resolveMatchedPrice", () => {
     expect(resolveMatchedPrice("openrouter", "anthropic-claude-3.5-sonnet")).toBeNull();
   });
 
-  test("16. shipped overlay membership: 121 keys, including canonical Fable 5.1, Opus 5 and compatibility prices", () => {
-    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(121);
+  test("16. shipped overlay membership: 131 keys, including canonical Fable 5.1, Opus 5, Opus 5.5, OpenCode Go and compatibility prices", () => {
+    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(139);
     expect(EXPECTED_PRICE_OVERLAYS.some(row => row.status === "unverified")).toBe(false);
     const keys = new Set(EXPECTED_PRICE_OVERLAYS.map(row => `${row.provider}/${row.modelId}`));
     for (const expected of [
@@ -309,6 +396,11 @@ describe("resolveMatchedPrice", () => {
       "anthropic/claude-opus-5",
       "cursor/claude-opus-5",
       "kiro/claude-opus-5",
+      "anthropic/claude-opus-5-5",
+      "anthropic-apikey/claude-opus-5-5",
+      "cursor/claude-opus-5-5",
+      "devin/claude-opus-5-5",
+      "devin-cli/claude-opus-5-5",
       "openai/gpt-daybreak-blue-latest",
       "openai-apikey/daybreak-red-latest",
       "openai-apikey/daybreak-blue-latest",
@@ -369,6 +461,13 @@ describe("resolveMatchedPrice", () => {
       "kimi-code/kimi-for-coding",
       "alibaba-token-plan/qwen3.8-max",
       "alibaba-token-plan-intl/qwen3.8-max",
+      // OpenCode Go — served ids with no jawcode bundle row; each reuses the
+      // vendor's published list price as a verified-derived estimate.
+      "opencode-go/qwen3.8-max",
+      "opencode-go/qwen3.8-flash",
+      "opencode-go/deepseek-v4.1-flash",
+      "opencode-go/glm-5.3-flash",
+      "opencode-go/muse-spark-1.3-contributor",
       "cursor/auto",
       // Z.AI GLM family — the zai bundle is all-zero upstream, so each exposing
       // provider surface carries its own verified-derived rows (z.ai USD list).

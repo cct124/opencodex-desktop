@@ -1,5 +1,6 @@
 import { remoteWorkspaceEnabled } from "../remote-control/workspace-activation";
 import { AuxiliaryListenerBindError } from "./ports";
+import { runAdmittedBodyWork } from "./inbound-body-admission";
 import {
   buildWarmupCompletionFrames,
   buildWsErrorFrame,
@@ -68,11 +69,6 @@ import { runDevinProviderMergeStartupMigration } from "../providers/devin-provid
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
 import type { StorageCleanupPolicy } from "../types";
-import {
-  MAX_CONFIGURABLE_INBOUND_BODY_BYTES,
-  MIN_CONFIGURABLE_INBOUND_BODY_BYTES,
-  resolveInboundBodyLimitBytes,
-} from "./request-decompress";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 export {
   clearThreadAccountMap,
@@ -106,7 +102,6 @@ export {
   unregisterTurn,
 } from "./lifecycle";
 import {
-  addFinalRequestLog,
   hydrateRequestLogsFromDisk,
   httpStatusForRequestLogTerminal,
   inspectResponseLogSsePayload,
@@ -116,8 +111,8 @@ import {
   type RequestLogEntry,
 } from "./request-log";
 import { sessionLaneIdFromRequest } from "./request-log-conversation";
-import { admitWorkflowTurn, type WorkflowLane } from "../lib/workflow-budget";
-import { workflowRefusalResponse, type WorkflowRefusalLog } from "./workflow-refusal";
+import { setUsageLedgerRetention } from "./usage-ledger-retention";
+import { admitHttpWorkflowTurn, workflowDecisionRefusalResponse, type WorkflowRefusalLog } from "./workflow-refusal";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -181,7 +176,7 @@ import {
   type NativeMainStartupLifecycle,
 } from "../codex/native-profile-startup";
 import { EXTERNAL_CALL_PREFIX, LiveCallBindings } from "./live-call-bindings";
-import { codexCompatibleUrl, contextEndpoint, contextRelayActivated } from "../codex/context-compat";
+import { contextEndpoint, contextRelayActivated } from "../codex/context-compat";
 import { fetchAllModels, handleManagementAPI, VERSION, type ManagementApiDeps } from "./management-api";
 import {
   createManagementSessionControl,
@@ -204,9 +199,18 @@ import {
 } from "../lib/package-tree-integrity";
 import { detectInstall } from "../update/index";
 import { createServeOptions, type ServerIngress } from "./index/serve-options";
-import { inspectStartupOwnership, setStartupCacheInvalidationWrite, warnAgentTaskRecoveryStartup, warnPlaintextV2AgentMessagesStartup, type StartServerDeps } from "./index/startup-warnings";
+import { createClaudeInterceptLifecycle } from "./index/claude-intercept-lifecycle";
+import { inspectStartupOwnership, resolveInboundBodyLimitWithWarning, setStartupCacheInvalidationWrite, warnAgentTaskRecoveryStartup, warnPlaintextV2AgentMessagesStartup, type StartServerDeps } from "./index/startup-warnings";
+import { acquireSpendLedgerServerLifecycle, recordFailedStartRollback, type SpendLedgerServerLifecycle } from "./index/spend-ledger-lifecycle";
+export { waitForFailedStartRollback } from "./index/spend-ledger-lifecycle";
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
+  const spendLedgerLifecycle = acquireSpendLedgerServerLifecycle(getConfigDir());
+  try { return startServerWithSpendLedgerOwner(port, deps, spendLedgerLifecycle); }
+  catch (error) { recordFailedStartRollback(error, spendLedgerLifecycle.releaseAfterFailedStart()); throw error; }
+}
+
+function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartServerDeps, spendLedgerLifecycle: SpendLedgerServerLifecycle): Server<WsData> {
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
@@ -225,7 +229,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnPlaintextV2AgentMessagesStartup(config);
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
-  applyProxyEnv(config);
+  applyProxyEnv(config, true);
   assertServerAuthConfig(config);
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   const managementSessionControl = createManagementSessionControl(managementAuth);
@@ -299,6 +303,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   registerAppOwnedMemorySweepFallback();
   configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(config.appOwnedMemoryBudgetMb));
   enforceAppOwnedMemoryBudget();
+  // Observe-only mode still journals physical sends, so every server owns before configuring.
+  spendLedgerLifecycle.configure(config.spend);
+  // After ownership: a second server on the same home is refused above, so the process running
+  // this line is the only one appending to usage.jsonl and the only one that may compact it.
+  setUsageLedgerRetention(config.usageLedgerMaxBytes);
   registerCodexCooldownRecoveryProbeWorker(config);
   // Issue #42 Phase 3: opt-in archived auto-cleanup (default OFF). Unref'd hourly
   // tick for daily/weekly; startup evaluation is fire-and-forget after listen.
@@ -498,28 +507,18 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   ): Promise<Response> {
     const lease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
     if (!lease) return serverBusyResponse(req, "active turns", policy);
-    // A fan-out shares the conversation it serves. Without a reserve, a worker burst takes every
-    // slot under its own root and the interactive turn that started it waits behind its own
-    // children. A request that names a parent is treated as that fan-out; a top-level request is
-    // the conversation and may use the reserved slots.
-    const workflowRootId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
-    const workflowThreadId = req.headers.get("thread-id")?.trim() || undefined;
-    const workflowLane: WorkflowLane = workflowRootId !== undefined
-      && workflowThreadId !== undefined
-      && workflowThreadId !== workflowRootId
-      ? "worker"
-      : "interactive";
-    const workflow = admitWorkflowTurn(workflowRootId, workflowLane, undefined, workflowThreadId);
+    // Root, lane, and the refusal that follows from them, all live in ./workflow-refusal.
+    const workflow = admitHttpWorkflowTurn(req.headers);
     if (workflow && !workflow.admitted) {
       lease.release();
       // withCors, because without Access-Control-Allow-Origin the exposed refusal header is
       // still unreadable to a browser dashboard -- which made exposing it pointless.
-      return withCors(workflowRefusalResponse(workflow.reason, undefined, refusalLog), req, policy);
+      return withCors(workflowDecisionRefusalResponse(workflow, undefined, refusalLog), req, policy);
     }
     const releaseWorkflow = (): void => { if (workflow?.admitted) workflow.lease.release(); };
     let response: Response;
     try {
-      response = await work(lease);
+      response = await runAdmittedBodyWork(req, policy, config.maxInboundBodyBytes, () => work(lease), refusalLog);
     } catch (error) {
       releaseWorkflow();
       lease.release();
@@ -629,26 +628,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   let server: Server<WsData>;
   let loopbackServer: Server<WsData> | null = null;
   let managementIngressServer: Server<WsData> | null = null;
-
-  // Resolved once, before any listener binds. The clamp is silent inside the resolver so it
-  // stays pure and per-request cheap; the operator is told here instead, once, because a
-  // config value that was quietly reduced is exactly the thing they would otherwise debug
-  // against the wrong limit.
-  const inboundBodyLimitBytes = resolveInboundBodyLimitBytes(config.maxInboundBodyBytes);
-  const requestedInboundBodyLimit = config.maxInboundBodyBytes;
-  if (requestedInboundBodyLimit !== undefined
-    && requestedInboundBodyLimit > 0
-    && requestedInboundBodyLimit !== inboundBodyLimitBytes) {
-    console.warn(
-      `[server] maxInboundBodyBytes=${requestedInboundBodyLimit} is outside the supported range `
-      + `[${MIN_CONFIGURABLE_INBOUND_BODY_BYTES}, ${MAX_CONFIGURABLE_INBOUND_BODY_BYTES}]; `
-      + `using ${inboundBodyLimitBytes} bytes.`,
-    );
-  }
+  const claudeIntercept = createClaudeInterceptLifecycle<WsData>();
+  const inboundBodyLimitBytes = resolveInboundBodyLimitWithWarning(config);
 
   function ingressForServer(requestServer: Server<WsData>): ServerIngress {
     if (requestServer === loopbackServer) return "unauthenticated-loopback";
     if (requestServer === managementIngressServer) return "hub-management";
+    if (claudeIntercept.ownsListener(requestServer)) return "claude-intercept";
     return "public";
   }
   let backgroundLifecycle: ReturnType<typeof acquireServerBackgroundLifecycle> | null = null;
@@ -707,7 +693,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       get remoteWorkspaceStopping() { return remoteWorkspaceStopping; },
     });
 
-    server = Bun.serve<WsData>({ ...serveOptions, port: listenPort, hostname: bindHost });
+    server = spendLedgerLifecycle.track(Bun.serve<WsData>({ ...serveOptions, port: listenPort, hostname: bindHost }));
 
     // Both binds are one startup transaction (#1102). If the loopback bind fails after the
     // public one succeeded, leaving the public listener up would strand it: the CLI's port
@@ -715,11 +701,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // accumulating listeners. Roll back and rethrow the original error instead.
     if (loopbackListenerPort !== null) {
       try {
-        loopbackServer = Bun.serve<WsData>({
+        loopbackServer = spendLedgerLifecycle.track(Bun.serve<WsData>({
           ...serveOptions,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
-        });
+        }));
       } catch (error) {
         try {
           // startServer is synchronous, so this rollback cannot await. Bun begins closing the
@@ -735,11 +721,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     }
     if (managementIngressPort !== null) {
       try {
-        managementIngressServer = Bun.serve<WsData>({
+        managementIngressServer = spendLedgerLifecycle.track(Bun.serve<WsData>({
           ...serveOptions,
           port: managementIngressPort,
           hostname: "127.0.0.1",
-        });
+        }));
       } catch (error) {
         // Preserve the management bind failure while synchronously initiating rollback of every
         // listener already opened in this startup transaction. startServer must not become async.
@@ -750,6 +736,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         throw new AuxiliaryListenerBindError("hub.managementIngress", managementIngressPort, "127.0.0.1", error);
       }
     }
+    claudeIntercept.start({
+      config, publicPort: server.port ?? listenPort, requestedPort: listenPort, maxRequestBodySize: inboundBodyLimitBytes,
+      dispatch: (req, requestServer) => serveOptions.fetch(req, requestServer),
+    });
   } catch (error) {
     unregisterQuotaAutoRefresh?.();
     userCostOverlayReconciler?.stop();
@@ -778,6 +768,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...(managementIngressRef
             ? [() => managementIngressRef.stop(closeActiveConnections)]
             : []),
+          () => claudeIntercept.stop(),
           async () => { await remoteWorkspaceShutdown?.(); },
           async () => {
             try {
@@ -787,16 +778,17 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             }
           },
         ],
-        async () => {
+        async listenersStopped => {
           try {
             await backgroundLifecycle.release();
             await releaseNativeMainStartupLifecycle(server);
           } finally {
             // icacls.exe from hardenConfigDir() holds the config dir open; a caller that
             // removes the dir right after stop() settles would hit EPERM/EBUSY on Windows
-            // otherwise. Runs even when an earlier release rejected — that rejection still
-            // propagates, but not before the child is drained.
-            await flushConfigDirHardening(startupConfigDir);
+            // otherwise. Config hardening still flushes when an earlier release rejects. The
+            // spend owner is retained when a listener stop failed because the socket may live.
+            try { if (listenersStopped) spendLedgerLifecycle.release(); }
+            finally { await flushConfigDirHardening(startupConfigDir); }
           }
         },
       );

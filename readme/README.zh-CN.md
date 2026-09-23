@@ -89,7 +89,33 @@ ocx start                         # 代理 + 仪表板：localhost:10100
 打开 **http://localhost:10100**，在 Web 仪表板中完成所有配置 —— 添加提供商
 （40 多个内置，或任意 OpenAI 兼容端点）、选择模型、管理账户。随时运行 `ocx gui`
 可重新打开仪表板。
-它还能为 Codex 认证管理一个 **ChatGPT 账户池**。添加多个 ChatGPT / Codex 账户，
+
+<details>
+<summary><b>桌面应用与 macOS 小组件 —— 测试版</b></summary>
+
+它是同一套仪表板的原生外壳，另带 WidgetKit 扩展，无需打开浏览器即可查看代理状态、
+今日用量和提供商配额。代理本身没有变化：应用会连接已在运行的代理；若未发现，
+则启动内置的 `ocx` sidecar。仪表板仍位于 **http://localhost:10100**。
+
+桌面应用目前仍处于测试阶段。构建已签名以保障完整性，但尚未公证，因此 macOS
+首次启动时需要右键点击并选择“打开”，Windows SmartScreen 也会对安装程序发出警告。
+小组件需要 macOS 14 或更高版本；它所呈现的快照模型位于 [`app/`](../app)
+（`MenuBarCore`）。
+
+请从[最新发布版本](https://github.com/lidge-jun/opencodex/releases)下载，或使用
+`bun run prepare-sidecar && bun run prepare-widget && bunx tauri build` 在本地构建。
+
+安装位置、服务文件以及写入磁盘的其他内容均列在
+[`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed) 中。
+[桌面应用指南](https://lidge-jun.github.io/opencodex/guides/desktop-app/)和
+[macOS 菜单栏应用指南](https://lidge-jun.github.io/opencodex/guides/macos-menu-bar/)
+介绍了各平台的安装方式和 Gatekeeper 提示。
+
+</details>
+
+### ChatGPT 账户池
+
+opencodex 还能为 Codex 认证管理一个 **ChatGPT 账户池**。添加多个 ChatGPT / Codex 账户，
 在仪表板中刷新它们的 5 小时 / 每周 / 30 天配额。在配额路由下，新会话可以使用
 使用量最低的健康账户；round-robin 和 fill-first 则各自使用自己的策略。现有 Codex
 线程通常会保持对启动它的账户的亲和性，因此长时间的 SSH、tmux 或移动端连接的会话
@@ -123,13 +149,13 @@ ocx start                         # 代理 + 仪表板：localhost:10100
 <details>
 <summary>Docker Compose</summary>
 
-本仓库提供摘要固定、非 root 的 Compose 构建。在宿主机安装 Git 和 Bun 后，每次构建镜像前
-先生成规范兼容性清单，然后通过 stdin 初始化一次数据面令牌，再启动 hub：
+本仓库提供摘要固定、非 root 的 Compose 构建。构建会根据所选 Git 快照自行生成并验证规范兼容性
+清单。本地克隆需要 Git 和 Docker Compose；远程 Git 上下文需要 Docker Compose。两种方式都不需要
+宿主机安装 Bun，也不需要准备步骤。通过 stdin 初始化一次数据面令牌，再启动 hub：
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
-bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
@@ -140,11 +166,27 @@ curl --fail --silent http://127.0.0.1:10100/readyz
 默认主机绑定是 `127.0.0.1:10100`。远程暴露需要显式
 `OPENCODEX_BIND_ADDRESS=<LAN-or-Tailscale-IP> docker compose up -d`；`0.0.0.0` 会选择加入
 全部主机接口。用防火墙和经过认证的 TLS/tailnet 前端限制访问。
-生成的 JSON 保持未跟踪；它会被复制进镜像，且不包含 `.git`。
-源码变更后请重新生成，并且在生成与构建之间不要改动源码。
-构建会拒绝过期清单、缺失或不匹配的文件、额外源文件以及符号链接。
+生成的 JSON 保持未跟踪。构建上下文只接收 `.git/index` 和 `.git/HEAD`，也就是
+`git ls-files` 读取的清单；其大小约为 1 MB，而不是完整的对象存储。这些文件只能通过只读挂载
+在构建专用的清单阶段中看到，因此没有任何 `COPY` 会包含 `.git`。宿主机上已有的清单只有在
+通过验证后才会被接受；否则构建会自行生成。构建会拒绝过期清单、缺失或不匹配的文件、额外源文件以及符号链接。
 它会核对构建上下文和复制进运行时的每个已记录 SHA-256，包括
 `package.json`、`bun.lock`，以及被明确纳入的 `scripts/model-metadata.source.json`。
+
+远程 Git 上下文需要 BuildKit 保留 Git 元数据。以下 Compose 构建片段会选择远程快照，
+并传入所需的内置参数：
+
+```yaml
+services:
+  hub:
+    pull_policy: build
+    build:
+      context: https://github.com/lidge-jun/opencodex.git#main
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
+```
 
 令牌和可变状态留在 `ocx-state` 命名卷中；镜像、Compose 文件、环境或 shell 参数里
 都不会放入任何凭证。提供商配置、经认证的验收检查、远程管理和回滚，见
@@ -288,7 +330,7 @@ Qwen Cloud、Qoder Global 和 CN（官方 PAT + CLI）、SiliconFlow，以及更
 
 ```bash
 ocx init                       # 交互式设置（写入配置、接入 Codex、提供 shim）
-ocx start [--port 10100]       # 在前台启动代理
+ocx start [--port 10100] [--socks5 [host:port] | --socks5-off]  # SOCKS5 默认为 socks5://127.0.0.1:10808
 ocx stop                       # 停止并恢复原生 Codex
 ocx service [install|repair|restart|start|stop|status|uninstall|remove]  # 后台服务
 ocx codex-shim install         # 每当启动 `codex` 时按需启动代理
@@ -303,8 +345,8 @@ ocx v2 <...>                   # 多智能体 v1/v2 表面控制
 ocx update [--tag preview]     # 更新 opencodex
 ```
 
-未固定端口的启动在首选端口被占用时可能改选其他空闲端口；显式 `--port`
-绝不会换端口。完整参考：[CLI 文档](https://opencodex.me/zh-cn/reference/cli/)。
+首选端口被占用时，启动会停止并指出占用者，而不会改用其他端口，因此绝不会在第一个代理旁留下另一个
+运行中的代理。请释放该端口，或用 `--port` 指定其他端口。完整参考：[CLI 文档](https://opencodex.me/zh-cn/reference/cli/)。
 
 ### 健康与就绪
 
