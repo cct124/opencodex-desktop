@@ -11,7 +11,7 @@
 - 上游：<https://github.com/lidge-jun/opencodex>
 - 起点：`v2.50.0`
 - 提交：`2d4d7a22381a2e497c2442902104619e25f937c7`
-- 当前同步：`v2.63.0`（桌面版 `0.1.4`），运行时跟随上游固定为 Bun `1.4.0`。
+- 当前同步：`v2.73.0`（桌面版 `0.1.5`），运行时跟随上游固定为 Bun `1.4.0`。
 - 桌面集成分支：`codex/desktop-m3-distribution`
 - 公开 fork：<https://github.com/cct124/opencodex-desktop>。
 
@@ -45,11 +45,11 @@
 
 普通分支提交生成测试包；推送与桌面版本匹配的 `desktop-v<版本>` 标签后，工作流自动构建并发布 [GitHub 预发布版本](https://github.com/cct124/opencodex-desktop/releases)。三个平台必须全部通过验收；发布任务还会核对提交、版本、文件列表与 SHA-256，再上传三个安装包、对应校验文件和按平台命名的构建信息。Release 附件使用 `OpenCodex-Desktop_...` 文件名，校验文件和构建信息同步使用该名称。
 
-维护者先更新桌面 package、Cargo 和锁文件，并新增 `desktop-fork/releases/<版本>.md` 发布说明，提交并推送代码。确认待发布提交后，以当前 `0.1.4` 为例：
+维护者先更新桌面 package、Cargo 和锁文件，并新增 `desktop-fork/releases/<版本>.md` 发布说明，提交并推送代码。确认待发布提交后，以当前 `0.1.5` 为例：
 
 ```bash
-git tag -a desktop-v0.1.4 -m "OpenCodex Desktop 0.1.4"
-git push origin desktop-v0.1.4
+git tag -a desktop-v0.1.5 -m "OpenCodex Desktop 0.1.5"
+git push origin desktop-v0.1.5
 ```
 
 只对尚未发布的新版本创建标签，不移动已有发布标签。标签提交必须包含本自动发布工作流。失败后可在该标签的 Actions 运行中重试失败任务；工作流会继续上传自己的未发布草稿，全部校验通过后才公开。已公开的完整版本和手动创建的发布不会被覆盖。
