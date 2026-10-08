@@ -371,7 +371,7 @@ Codex. Ses routes sont les suivantes :
 | --- | --- | --- |
 | `GET, POST, DELETE /api/codex-auth/accounts` | Répertorier, actualiser ou supprimer des comptes Codex. POST est conservé comme point de terminaison de compatibilité désactivé ; les réponses DELETE réussies incluent `catalogRefreshPending`. | POST renvoie toujours 403 `manual_import_disabled` ; 400 entrée DELETE invalide |
 | `PUT /api/codex-auth/accounts/alias` | Définir ou supprimer un alias de compte | 400 invalide account/alias |
-| `PUT /api/codex-auth/accounts/pause` | Suspendre ou reprendre un compte | 400 invalide account/state ; 404 compte manquant |
+| `PUT /api/codex-auth/accounts/pause` | Suspendre ou reprendre manuellement un compte et ses entrées principales ou du pool existantes de même identité ; renvoie `affectedAccountIds` | 400 compte/état invalide ; 404 compte introuvable ; 503 identité du compte principal occupée ou illisible |
 | `PUT /api/codex-auth/accounts/pause-exhausted` | Suspendre les comptes dont le quota est épuisé | Les échecs de verrouillage de mutation deviennent 503 |
 | `POST /api/codex-auth/accounts/clear-cooldown` | Effacer le temps de recharge d'exécution pour un compte ou tous les comptes | 400 identifiant invalide |
 | `GET, PUT /api/codex-auth/active` | Lire ou sélectionner le compte actif | 400 compte invalide ou manquant ; 409 conflit avec un compte suspendu ou une ancienne ligne |
@@ -422,3 +422,15 @@ Anthropic OAuth uniquement. `{ provider: "anthropic", accountId, threshold }` : 
 Le DTO inclut `autoSwitchThresholdOverride` (entier/null), `autoSwitchThreshold` (défaut du pool) et `effectiveAutoSwitchThreshold`. 0 désactive seulement le basculement selon l’utilisation ; pause et reprise après 429 restent actives.
 
 HTTP: 400 invalid/unsupported; 404 missing account; `oauth_mutation_busy` on lock contention.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
